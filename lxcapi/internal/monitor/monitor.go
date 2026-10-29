@@ -108,7 +108,7 @@ func (m *Monitor) wait(ctx context.Context, d time.Duration) bool {
 
 func (m *Monitor) loadRows() []models.Container {
 	var containers []models.Container
-	if err := db.DB.Select("name", "status", "traffic_limit", "traffic_usage", "rx_bytes", "tx_bytes", "locked", "traffic_over_action", "traffic_over_limitspeed").
+	if err := db.DB.Select("name", "status", "traffic_limit", "traffic_usage", "rx_bytes", "tx_bytes", "traffic_over", "traffic_over_action", "traffic_over_limitspeed").
 		Find(&containers).Error; err != nil {
 		logger.Error("获取容器列表失败: %v", err)
 		return nil
@@ -189,7 +189,7 @@ func (m *Monitor) collectRunning(c *models.Container, state *containerUsageSnaps
 			action = "frozen"
 		}
 
-		updates["locked"] = true
+		updates["traffic_over"] = true
 
 		if action == "limited" {
 			if c.Status != "limited" {
@@ -533,14 +533,14 @@ type TrafficInfo struct {
 	TrafficResetCycle string `json:"traffic_reset_cycle"`
 	TrafficOverAction string `json:"traffic_over_action"`
 	TrafficOverLimitSpeed int `json:"traffic_over_limitspeed"`
-	Locked        bool      `json:"locked"`
+	TrafficOver   bool      `json:"traffic_over"`
 	LastReset     time.Time `json:"last_reset"`
 }
 
 func (m *Monitor) GetTraffic(containerName string) (*TrafficInfo, error) {
 	var container models.Container
 	if err := db.DB.Where("name = ?", containerName).
-		Select("name", "traffic_usage", "traffic_limit", "rx_bytes", "tx_bytes", "locked", "last_reset",
+		Select("name", "traffic_usage", "traffic_limit", "rx_bytes", "tx_bytes", "traffic_over", "last_reset",
 			"traffic_reset_cycle", "traffic_over_action", "traffic_over_limitspeed").
 		First(&container).Error; err != nil {
 		return nil, err
@@ -554,7 +554,7 @@ func (m *Monitor) GetTraffic(containerName string) (*TrafficInfo, error) {
 		TrafficResetCycle: container.TrafficResetCycle,
 		TrafficOverAction: container.TrafficOverAction,
 		TrafficOverLimitSpeed: container.TrafficOverLimitSpeed,
-		Locked:        container.Locked,
+		TrafficOver:   container.TrafficOver,
 		LastReset:     container.LastReset,
 	}, nil
 }
@@ -578,7 +578,7 @@ func (m *Monitor) autoResetTraffic() {
 
 	var containers []models.Container
 	// 具备补偿机制：记录到本月首日之前未重置或从未重置的都视为待重置
-	if err := db.DB.Select("name", "status", "locked", "last_reset", "traffic_reset_cycle", "traffic_over_action", "ingress", "egress").
+	if err := db.DB.Select("name", "status", "traffic_over", "last_reset", "traffic_reset_cycle", "traffic_over_action", "ingress", "egress").
 		Find(&containers).Error; err != nil {
 		logger.Error("查询待重置流量记录失败: %v", err)
 		return
@@ -601,7 +601,7 @@ func (m *Monitor) autoResetTraffic() {
 			continue
 		}
 
-		if container.Status == "frozen" && !container.Locked {
+		if container.Status == "frozen" && !container.TrafficOver {
 			continue
 		}
 
@@ -618,7 +618,7 @@ func (m *Monitor) autoResetTraffic() {
 			"rx_bytes":      int64(state.RxBytes),
 			"tx_bytes":      int64(state.TxBytes),
 			"traffic_usage": 0.0,
-			"locked":        false,
+			"traffic_over":        false,
 			"last_reset":    now,
 		}
 		if container.Status == "frozen" {
@@ -659,7 +659,7 @@ func (m *Monitor) ResetTraffic(containerName string) error {
 		"rx_bytes":      int64(state.RxBytes),
 		"tx_bytes":      int64(state.TxBytes),
 		"traffic_usage": 0.0,
-		"locked":        false,
+		"traffic_over":        false,
 		"last_reset":    time.Now(),
 	}).Error
 

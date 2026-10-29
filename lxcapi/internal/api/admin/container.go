@@ -209,20 +209,6 @@ func ContainerAction(c *gin.Context) {
 		logger.OK("容器密码重置成功: %s", name)
 		response.Success(c, "密码重置成功")
 
-	case "unlimit":
-		if container.Status != "limited" && !container.Locked {
-			response.Error(c, 400, "容器当前未处于限速状态")
-			return
-		}
-		if err := executor.CreateSyncTask(name, "unlimit", func(ctx context.Context) error {
-			return svc.UnlimitSpeed(ctx, name)
-		}); err != nil {
-			response.Error(c, 500, err.Error())
-			return
-		}
-		logger.OK("容器已解除限速: %s", name)
-		response.Success(c, "已解除限速")
-
 	case "reset-traffic":
 		if monitor.GlobalMonitor == nil {
 			response.Error(c, 500, "流量监控未启用")

@@ -94,7 +94,6 @@
                 <button onclick="showUpdateConfigModal()" class="px-2 py-1 lg:py-1.5 text-xs font-medium text-teal-700 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded transition whitespace-nowrap">更换配置</button>
 
                 <button onclick="resetTraffic()" class="px-2 py-1 lg:py-1.5 text-xs font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded transition whitespace-nowrap">重置流量</button>
-                <button onclick="unlimitContainer()" id="btnUnlimit" style="display:none;" class="px-2 py-1 lg:py-1.5 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded transition whitespace-nowrap">解除限速</button>
                 <button onclick="deleteContainer()" class="px-2 py-1 lg:py-1.5 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded transition whitespace-nowrap">删除容器</button>
             </div>
         </div>
@@ -853,8 +852,6 @@
                 '<span class="px-2 py-0.5 text-xs font-medium text-orange-700 bg-orange-100 rounded-full flex items-center gap-1 w-fit"><span class="w-1.5 h-1.5 bg-orange-500 rounded-full"></span>已限速</span>' :
                 '<span class="px-2 py-0.5 text-xs font-medium text-yellow-700 bg-yellow-100 rounded-full">其他</span>';
 
-            $('#btnUnlimit').toggle(containerStatus === 'limited');
-
             const iconColor = containerStatus === 'running' ? 'from-green-500 to-green-600' :
                 containerStatus === 'stopped' ? 'from-gray-500 to-gray-600' :
                 containerStatus === 'frozen' ? 'from-yellow-500 to-yellow-600' :
@@ -1597,32 +1594,6 @@
             });
         }
 
-
-        function unlimitContainer() {
-            if (!confirm(`确定要解除容器 ${containerName} 的限速吗？`)) {
-                return;
-            }
-
-            $.ajax({
-                url: `/api/admin/containers/${encodeURIComponent(containerName)}/action?action=unlimit`,
-                type: 'POST',
-                success: function(result) {
-                    if (result.code === 200) {
-                        showToast('success', '已解除限速');
-                        setTimeout(() => loadContainerInfo(), 1000);
-                    } else {
-                        showToast('error', result.msg || '解除限速失败');
-                    }
-                },
-                error: function(xhr) {
-                    let errorMsg = '解除限速失败';
-                    if (xhr.responseJSON && xhr.responseJSON.msg) {
-                        errorMsg = xhr.responseJSON.msg;
-                    }
-                    showToast('error', errorMsg);
-                }
-            });
-        }
 
         function checkNATPort() {
             const port = $('#natExternalPort').val();

@@ -516,10 +516,18 @@ function lxcapiserver_Status($params)
         $containerStatus = $res['data']['status'];
         $result = ['status' => 'success'];
 
-        $dbStatus = strtolower($res['data']['container']['status'] ?? '');
-        if ($dbStatus === 'limited') {
+        $containerInfo = $res['data']['container'] ?? [];
+        $dbStatus = strtolower($containerInfo['Status'] ?? ($containerInfo['status'] ?? ''));
+        $trafficOver = !empty($containerInfo['traffic_over']);
+
+        if ($trafficOver && $dbStatus === 'frozen') {
+            $result['data']['status'] = 'suspend';
+            $result['data']['des'] = '流量超限已暂停';
+            return $result;
+        }
+        if ($trafficOver || $dbStatus === 'limited') {
             $result['data']['status'] = 'on';
-            $result['data']['des'] = '已限速';
+            $result['data']['des'] = '流量超限已限速';
             return $result;
         }
 

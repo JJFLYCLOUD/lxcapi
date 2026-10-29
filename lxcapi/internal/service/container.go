@@ -360,8 +360,8 @@ func (s *ContainerService) UnlimitSpeed(ctx context.Context, name string) error 
 	}
 
 	if err := db.DB.Model(&models.Container{}).Where("name = ?", name).Updates(map[string]interface{}{
-		"locked": false,
-		"status": status,
+		"traffic_over": false,
+		"status":       status,
 	}).Error; err != nil {
 		return fmt.Errorf("更新容器状态失败: %v", err)
 	}
@@ -599,7 +599,7 @@ func (s *ContainerService) GetInfo(ctx context.Context, name string) (map[string
 		"traffic_over_limitspeed": container.TrafficOverLimitSpeed,
 		"rx_bytes":            container.RxBytes,
 		"tx_bytes":            container.TxBytes,
-		"locked":              container.Locked,
+		"traffic_over":         container.TrafficOver,
 		"ipv4_pool_limit":     container.IPv4PoolLimit,
 		"ipv4_mapping_limit":  container.IPv4MappingLimit,
 		"ipv6_mapping_limit":  container.IPv6MappingLimit,

@@ -186,7 +186,7 @@
 
 `POST` `/api/admin/containers/:name/action`
 
-对容器执行操作: start/stop/restart/pause/resume/reinstall/reset-password/reset-traffic/unlimit
+对容器执行操作: start/stop/restart/pause/resume/reinstall/reset-password/reset-traffic
 
 - **认证**: SessionAuth
 

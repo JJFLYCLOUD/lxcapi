@@ -11,7 +11,7 @@ class LxcTrafficResetPlugin extends \app\admin\lib\Plugin
         'title'       => 'LXC流量重置支付回调',
         'description' => '监听账单支付成功事件，自动执行LXC容器流量重置（配合 lxcapiserver 服务器模块使用）',
         'status'      => 1,
-        'author'      => 'xkatld',
+        'author'      => 'JJFLYCLOUD',
         'version'     => '1.0.0',
         'module'      => 'addons',
     ];

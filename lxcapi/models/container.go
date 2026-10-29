@@ -56,7 +56,7 @@ type Container struct {
 	TrafficUsage   float64 // 已用流量，单位GB
 	RxBytes        int64   `gorm:"default:0"`
 	TxBytes        int64   `gorm:"default:0"`
-	Locked         bool    `gorm:"default:false"`
+	TrafficOver    bool    `gorm:"column:traffic_over;default:false" json:"traffic_over"`
 	LastReset      time.Time
 	IPv4PoolLimit   int
 	IPv4MappingLimit int

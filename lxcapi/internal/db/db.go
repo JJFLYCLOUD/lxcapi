@@ -74,6 +74,7 @@ func Init() error {
 		return err
 	}
 
+	migrateLockedToTrafficOver()
 	dropLegacyColumns()
 	return nil
 }
@@ -131,6 +132,26 @@ func migrateLegacyTrafficUsage() {
 			fmt.Printf("迁移 traffic_usage 列失败 (sqlite rename): %v\n", err)
 			return
 		}
+	}
+}
+
+// migrateLockedToTrafficOver 将旧列 locked 的数据迁移到 traffic_over 并删除旧列。
+func migrateLockedToTrafficOver() {
+	if !DB.Migrator().HasColumn(&models.Container{}, "locked") {
+		return
+	}
+	if !DB.Migrator().HasColumn(&models.Container{}, "traffic_over") {
+		fmt.Printf("traffic_over 列不存在，跳过 locked 迁移\n")
+		return
+	}
+
+	if err := DB.Exec("UPDATE containers SET traffic_over = locked").Error; err != nil {
+		fmt.Printf("迁移 locked -> traffic_over 失败: %v\n", err)
+		return
+	}
+
+	if err := DB.Exec("ALTER TABLE containers DROP COLUMN locked").Error; err != nil {
+		fmt.Printf("删除旧列 locked 失败: %v\n", err)
 	}
 }
 

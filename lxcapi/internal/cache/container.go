@@ -29,7 +29,7 @@ type ContainerCacheJSON struct {
 	TrafficOverLimitSpeed int              `json:"traffic_over_limitspeed"`
 	RxBytes         int64                  `json:"rx_bytes"`
 	TxBytes         int64                  `json:"tx_bytes"`
-	Locked          bool                   `json:"locked"`
+	TrafficOver     bool                   `json:"traffic_over"`
 	Config          map[string]interface{} `json:"config"`
 	CreatedAt       *time.Time             `json:"created_at"`
 	LastSync        *time.Time             `json:"last_sync"`
@@ -139,7 +139,7 @@ func buildCacheEntry(c models.Container) *ContainerCacheJSON {
 		TrafficOverLimitSpeed: c.TrafficOverLimitSpeed,
 		RxBytes:        c.RxBytes,
 		TxBytes:        c.TxBytes,
-		Locked:         c.Locked,
+		TrafficOver:    c.TrafficOver,
 		CreatedAt:      c.CreatedAtLXD,
 		LastSync:       c.LastSync,
 		Remark:         c.Remark,
