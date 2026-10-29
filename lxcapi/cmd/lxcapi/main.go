@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
@@ -32,9 +33,12 @@ import (
 	"lxcapi/plugins/nginx"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
+	"time"
 )
 
 //go:embed templates static
@@ -49,6 +53,9 @@ func main() {
 
 	logger.Init(cfg.System.Logger.Level, cfg.System.Logger.Colorful)
 	logger.Info("配置加载成功")
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	if err := validateSecurityConfig(cfg); err != nil {
 		logger.Error("安全配置校验失败: %v", err)
@@ -129,7 +136,6 @@ func main() {
 		logger.OK("任务队列初始化成功")
 	}
 
-	ctx := context.Background()
 	if monitor.GlobalMonitor != nil {
 		go monitor.GlobalMonitor.Start(ctx)
 		logger.OK("流量监控器已启动")
@@ -381,15 +387,62 @@ func main() {
 	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.System.Server.Host, cfg.System.Server.Port)
-	
+
+	var certFile, keyFile string
 	if cfg.System.Server.TLS.Enabled {
-		startWithTLS(r, addr, cfg)
-	} else {
+		certFile, keyFile = prepareTLS(cfg)
+	}
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	serverErr := make(chan error, 1)
+	go func() {
+		if cfg.System.Server.TLS.Enabled {
+			logger.Info("服务启动 (HTTPS)，监听 %s", addr)
+			serverErr <- srv.ListenAndServeTLS(certFile, keyFile)
+			return
+		}
 		logger.Info("服务启动 (HTTP)，监听 %s", addr)
-		if err := r.Run(addr); err != nil {
+		serverErr <- srv.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serverErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("服务启动失败: %v", err)
 		}
+	case <-ctx.Done():
+		logger.Info("收到退出信号，开始优雅关闭...")
+
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("HTTP 服务优雅关闭超时: %v", err)
+			_ = srv.Close()
+		}
+		shutdownCancel()
 	}
+
+	if executor.GlobalQueue != nil {
+		queueDone := make(chan struct{})
+		go func() {
+			executor.GlobalQueue.Stop()
+			close(queueDone)
+		}()
+
+		select {
+		case <-queueDone:
+			logger.OK("任务队列已停止")
+		case <-time.After(10 * time.Second):
+			logger.Warn("任务队列停止超时，强制退出")
+		}
+	}
+
+	pluginManager.StopAll()
+	logger.OK("服务已退出")
 }
 
 // validateSecurityConfig 校验关键安全配置，避免使用占位符或空值导致认证失效
@@ -403,7 +456,7 @@ func validateSecurityConfig(cfg *core.Config) error {
 	return nil
 }
 
-func startWithTLS(r *gin.Engine, addr string, cfg *core.Config) {
+func prepareTLS(cfg *core.Config) (string, string) {
 	tlsCfg := cfg.System.Server.TLS
 	certMgr := tlsManager.NewCertificateManager(tlsCfg.CertFile, tlsCfg.KeyFile)
 	
@@ -414,20 +467,23 @@ func startWithTLS(r *gin.Engine, addr string, cfg *core.Config) {
 	if tlsCfg.AutoGenerate {
 		generateSelfSignedCert(certMgr)
 		certSource = "自签名"
+	} else {
+		// 关闭自动生成时使用用户提供的证书。只要文件和私钥存在就继续启动，
+		// 证书是否可解析、是否过期由 TLS 握手做最终校验。
+		if !certMgr.CertificateExists() {
+			log.Fatalf("HTTPS 已启用但证书文件不存在: cert=%s key=%s（可设置 tls.auto_generate: true 自动生成自签名证书）", certFile, keyFile)
+		}
+		certSource = "自定义"
+		if !certMgr.ValidateCertificate() {
+			logger.Warn("证书无法解析或已过期，仍将尝试使用: %s", certFile)
+		}
 	}
-	
-	if certSource == "" {
-		log.Fatalf("无可用证书，无法启动HTTPS服务")
-	}
-	
+
 	logger.Info("证书来源: %s", certSource)
-	logger.Info("服务启动 (HTTPS)，监听 %s", addr)
 	logger.Info("TLS证书: %s", certFile)
 	logger.Info("TLS私钥: %s", keyFile)
-	
-	if err := r.RunTLS(addr, certFile, keyFile); err != nil {
-		logger.Error("HTTPS服务器启动失败: %v", err)
-	}
+
+	return certFile, keyFile
 }
 
 func generateSelfSignedCert(certMgr *tlsManager.CertificateManager) {

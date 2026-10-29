@@ -16,11 +16,59 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 type ContainerService struct {
 	lxcClient *lxc.Client
+}
+
+// 后台 IP 获取任务的取消登记。容器删除时必须取消，避免旧 goroutine 在容器被
+// 删除后用同名容器继续写 IP/端口映射。
+type ipRetryTask struct {
+	seq    uint64
+	cancel context.CancelFunc
+}
+
+var (
+	ipRetryMu      sync.Mutex
+	ipRetrySeq     uint64
+	ipRetryCancels = make(map[string]ipRetryTask)
+)
+
+func startIPRetry(containerName string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	ipRetryMu.Lock()
+	if old, ok := ipRetryCancels[containerName]; ok && old.cancel != nil {
+		old.cancel()
+	}
+	ipRetrySeq++
+	seq := ipRetrySeq
+	ipRetryCancels[containerName] = ipRetryTask{seq: seq, cancel: cancel}
+	ipRetryMu.Unlock()
+
+	return ctx, func() {
+		ipRetryMu.Lock()
+		if current, ok := ipRetryCancels[containerName]; ok && current.seq == seq {
+			delete(ipRetryCancels, containerName)
+		}
+		ipRetryMu.Unlock()
+	}
+}
+
+func cancelIPRetry(containerName string) {
+	ipRetryMu.Lock()
+	task, ok := ipRetryCancels[containerName]
+	if ok {
+		delete(ipRetryCancels, containerName)
+	}
+	ipRetryMu.Unlock()
+
+	if ok && task.cancel != nil {
+		task.cancel()
+	}
 }
 
 func NewContainerService() *ContainerService {
@@ -231,7 +279,11 @@ func (s *ContainerService) Create(ctx context.Context, req *models.CreateContain
 	needRetryIPv6 := privateIPv6 == ""
 	if needRetryIPv4 || needRetryIPv6 {
 		logger.Info("启动后台任务获取容器IP (IPv4: %v, IPv6: %v)", needRetryIPv4, needRetryIPv6)
-		go s.retryGetContainerIPs(req.Name, needRetryIPv4, needRetryIPv6, "", "")
+		retryCtx, done := startIPRetry(req.Name)
+		go func() {
+			defer done()
+			s.retryGetContainerIPs(retryCtx, req.Name, needRetryIPv4, needRetryIPv6, "", "")
+		}()
 	}
 	
 	if _, err := CreateContainerCredential(req.Name); err != nil {
@@ -369,6 +421,9 @@ func (s *ContainerService) Reinstall(ctx context.Context, name, image, password 
 		return fmt.Errorf("容器不存在: %v", err)
 	}
 
+	// 重装会重建容器，先取消旧的 IP 获取任务，避免旧结果覆盖新容器。
+	cancelIPRetry(name)
+
 	logger.Info("开始重装容器: %s", name)
 
 	if image == "" {
@@ -463,7 +518,11 @@ func (s *ContainerService) Reinstall(ctx context.Context, name, image, password 
 	needRetryIPv6 := actualPrivateIPv6 == ""
 	if needRetryIPv4 || needRetryIPv6 {
 		logger.Info("启动后台任务获取容器IP (IPv4: %v, IPv6: %v)", needRetryIPv4, needRetryIPv6)
-		go s.retryGetContainerIPs(name, needRetryIPv4, needRetryIPv6, container.PrivateIP, container.PrivateIPv6)
+		retryCtx, done := startIPRetry(name)
+		go func() {
+			defer done()
+			s.retryGetContainerIPs(retryCtx, name, needRetryIPv4, needRetryIPv6, container.PrivateIP, container.PrivateIPv6)
+		}()
 	}
 
 	logger.OK("容器重装完成: %s (IPv4: %s, IPv6: %s)", name,
@@ -473,6 +532,9 @@ func (s *ContainerService) Reinstall(ctx context.Context, name, image, password 
 }
 
 func (s *ContainerService) Delete(ctx context.Context, name string) error {
+	// 取消该容器的后台 IP 获取任务，避免容器删除后旧 goroutine 继续轮询/写库。
+	cancelIPRetry(name)
+
 	var container models.Container
 	if err := db.DB.Where("name = ?", name).First(&container).Error; err == nil && container.PrivateIPv6 != "" {
 		ipv6.CleanupProxyNDPForAddress(container.PrivateIPv6)
@@ -674,15 +736,24 @@ func (s *ContainerService) getContainerIPv6(ctx context.Context, name string) st
 	return ip
 }
 
-func (s *ContainerService) retryGetContainerIPs(containerName string, needIPv4, needIPv6 bool, oldIPv4, oldIPv6 string) {
-	ctx := context.Background()
+func (s *ContainerService) retryGetContainerIPs(ctx context.Context, containerName string, needIPv4, needIPv6 bool, oldIPv4, oldIPv6 string) {
 	maxRetries := 10
 	retryInterval := 2
 	
 	logger.Info("启动后台任务获取容器 %s 的IP地址 (IPv4: %v, IPv6: %v)", containerName, needIPv4, needIPv6)
 	
 	for i := 0; i < maxRetries; i++ {
-		time.Sleep(time.Duration(retryInterval) * time.Second)
+		select {
+		case <-ctx.Done():
+			logger.Info("后台IP获取任务已取消: %s", containerName)
+			return
+		case <-time.After(time.Duration(retryInterval) * time.Second):
+		}
+
+		if err := ctx.Err(); err != nil {
+			logger.Info("后台IP获取任务已取消: %s", containerName)
+			return
+		}
 		
 		updateFields := make(map[string]interface{})
 		updated := false
@@ -715,7 +786,9 @@ func (s *ContainerService) retryGetContainerIPs(containerName string, needIPv4, 
 		}
 		
 		if updated {
-			db.DB.Model(&models.Container{}).Where("name = ?", containerName).Updates(updateFields)
+			if err := db.DB.Model(&models.Container{}).Where("name = ?", containerName).Updates(updateFields).Error; err != nil {
+				logger.Warn("后台任务更新容器IP失败 %s: %v", containerName, err)
+			}
 		}
 		
 		if !needIPv4 && !needIPv6 {

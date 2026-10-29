@@ -46,12 +46,23 @@ func GetTask(c *gin.Context) {
 	response.Success(c, task)
 }
 
-// DeleteTask 删除任务
+// DeleteTask 删除任务（仅允许删除已结束的任务）
 func DeleteTask(c *gin.Context) {
 	taskID := c.Param("id")
 
 	if taskID == "" {
 		response.Error(c, 400, "缺少任务ID")
+		return
+	}
+
+	var task models.Task
+	if err := db.DB.Select("id", "status").Where("id = ?", taskID).First(&task).Error; err != nil {
+		response.Error(c, 404, "任务不存在")
+		return
+	}
+
+	if task.Status == models.TaskQueued || task.Status == models.TaskRunning {
+		response.Error(c, 400, "任务正在执行或排队中，无法删除")
 		return
 	}
 
@@ -78,13 +89,26 @@ func BatchDeleteTasks(c *gin.Context) {
 		return
 	}
 
-	if err := db.DB.Delete(&models.Task{}, "id IN ?", req.TaskIDs).Error; err != nil {
+	var activeCount int64
+	if err := db.DB.Model(&models.Task{}).
+		Where("id IN ? AND status IN ?", req.TaskIDs, []string{models.TaskQueued, models.TaskRunning}).
+		Count(&activeCount).Error; err != nil {
+		response.Error(c, 500, "校验任务状态失败")
+		return
+	}
+	if activeCount > 0 {
+		response.Error(c, 400, "包含正在执行或排队中的任务，无法删除")
+		return
+	}
+
+	result := db.DB.Delete(&models.Task{}, "id IN ?", req.TaskIDs)
+	if result.Error != nil {
 		response.Error(c, 500, "批量删除失败")
 		return
 	}
 
 	response.Success(c, gin.H{
-		"deleted": len(req.TaskIDs),
+		"deleted": result.RowsAffected,
 		"message": "批量删除成功",
 	})
 }

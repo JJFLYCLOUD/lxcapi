@@ -23,8 +23,9 @@ type Monitor struct {
 	interval  time.Duration
 	neighbor  atomic.Value
 
-	lastResetMonth int
-	lastResetDay   int
+	lastResetMonth   int
+	lastResetDay     int
+	lastResetAttempt time.Time
 
 	proxyMu      sync.Mutex
 	cycleDesired map[string]struct{}
@@ -34,6 +35,11 @@ type Monitor struct {
 // proxyNDPStaleGrace 为一个代理NDP条目连续缺席多少个监控周期后才被清理，
 // 用于规避单次采集抖动导致的短暂断网。
 const proxyNDPStaleGrace = 2
+
+// resetRetryInterval 自动重置流量失败后的重试间隔。
+// 成功完成一次全量重置后按天/月标记跳过；失败时按该间隔重试，
+// 而不是像以前一样等到下一个天/月周期。
+const resetRetryInterval = time.Minute
 
 var GlobalMonitor *Monitor
 
@@ -59,7 +65,7 @@ func (m *Monitor) Start(ctx context.Context) {
 	logger.Info("流量监控已启动，采样间隔: %v", m.interval)
 
 	// 启动时全量补重置一次未重置流量
-	m.autoResetTraffic()
+	m.maybeAutoResetTraffic()
 
 	for {
 		rows := m.loadRows()
@@ -108,7 +114,7 @@ func (m *Monitor) wait(ctx context.Context, d time.Duration) bool {
 
 func (m *Monitor) loadRows() []models.Container {
 	var containers []models.Container
-	if err := db.DB.Select("name", "status", "traffic_limit", "traffic_usage", "rx_bytes", "tx_bytes", "traffic_over", "traffic_over_action", "traffic_over_limitspeed").
+	if err := db.DB.Select("name", "status", "traffic_limit", "traffic_usage", "rx_bytes", "tx_bytes", "traffic_over", "traffic_over_action", "traffic_over_limitspeed", "ingress", "egress").
 		Find(&containers).Error; err != nil {
 		logger.Error("获取容器列表失败: %v", err)
 		return nil
@@ -126,6 +132,9 @@ func (m *Monitor) process(c *models.Container) {
 		return
 	}
 
+	// 先对账带宽：处理“超限标记仍在、但带宽恢复曾失败”的容器
+	m.reconcileBandwidth(c, state)
+
 	switch state.Status {
 	case "Running":
 		switch c.Status {
@@ -133,7 +142,9 @@ func (m *Monitor) process(c *models.Container) {
 			m.stopFrozenContainer(c.Name)
 		case "running", "stopped", "limited":
 			if c.Status == "stopped" {
-				db.DB.Model(&models.Container{}).Where("name = ?", c.Name).Update("status", "running")
+				if err := db.DB.Model(&models.Container{}).Where("name = ?", c.Name).Update("status", "running").Error; err != nil {
+					logger.Error("更新容器状态失败 %s: %v", c.Name, err)
+				}
 			}
 			m.collectRunning(c, state)
 		}
@@ -189,22 +200,43 @@ func (m *Monitor) collectRunning(c *models.Container, state *containerUsageSnaps
 			action = "frozen"
 		}
 
-		updates["traffic_over"] = true
-
 		if action == "limited" {
-			if c.Status != "limited" {
-				updates["status"] = "limited"
-				db.DB.Model(&models.Container{}).Where("name = ?", c.Name).Updates(updates)
-				logger.Warn("容器 %s 流量超限: %.4fGB / %dGB，已触发限速 %dMbit", c.Name, totalGB, c.TrafficLimit, c.TrafficOverLimitSpeed)
-				m.handleLimited(c)
-			} else {
-				db.DB.Model(&models.Container{}).Where("name = ?", c.Name).Updates(updates)
+			// 已经成功限速过，后续周期只需继续记账
+			if c.Status == "limited" {
+				updates["traffic_over"] = true
+				if err := db.DB.Model(&models.Container{}).Where("name = ?", c.Name).Updates(updates).Error; err != nil {
+					logger.Error("更新容器流量数据失败 %s: %v", c.Name, err)
+				}
+				return
 			}
+
+			// 先真正下发限速，成功后再写状态；失败只记账，下个周期重试，
+			// 避免出现“数据库显示已限速、实际仍全速”的假状态。
+			if err := m.handleLimited(c, totalGB); err != nil {
+				logger.Error("容器 %s 限速失败，将在下个监控周期重试: %v", c.Name, err)
+				if err := db.DB.Model(&models.Container{}).Where("name = ?", c.Name).Updates(updates).Error; err != nil {
+					logger.Error("更新容器流量数据失败 %s: %v", c.Name, err)
+				}
+				return
+			}
+
+			updates["traffic_over"] = true
+			updates["status"] = "limited"
+			if err := db.DB.Model(&models.Container{}).Where("name = ?", c.Name).Updates(updates).Error; err != nil {
+				logger.Error("更新容器限速状态失败 %s: %v", c.Name, err)
+			}
+			logger.Warn("容器 %s 流量超限: %.4fGB / %dGB，已触发限速", c.Name, totalGB, c.TrafficLimit)
 			return
 		}
 
+		updates["traffic_over"] = true
 		updates["status"] = "frozen"
-		db.DB.Model(&models.Container{}).Where("name = ?", c.Name).Updates(updates)
+		if err := db.DB.Model(&models.Container{}).Where("name = ?", c.Name).Updates(updates).Error; err != nil {
+			// 状态没写进数据库时不能停机，否则下一周期会看到 DB running + 实际 stopped，
+			// 被监控误判为意外停止并自动拉起，形成“停止—重启”循环。
+			logger.Error("冻结容器状态写库失败 %s: %v，跳过本次停机", c.Name, err)
+			return
+		}
 
 		logger.Warn("容器 %s 流量超限: %.4fGB / %dGB", c.Name, totalGB, c.TrafficLimit)
 		m.handleOverLimit(c.Name, totalGB, c.TrafficLimit)
@@ -214,7 +246,9 @@ func (m *Monitor) collectRunning(c *models.Container, state *containerUsageSnaps
 	updates["memory_usage_raw"] = uint64(state.MemUsage)
 	updates["disk_usage_raw"] = uint64(state.DiskUsage)
 	updates["last_sync"] = time.Now()
-	db.DB.Model(&models.Container{}).Where("name = ?", c.Name).Updates(updates)
+	if err := db.DB.Model(&models.Container{}).Where("name = ?", c.Name).Updates(updates).Error; err != nil {
+		logger.Error("更新容器监控数据失败 %s: %v", c.Name, err)
+	}
 
 	m.handleIPv6NeighborRequests(c.Name, state)
 }
@@ -452,7 +486,7 @@ func (m *Monitor) getContainerState(ctx context.Context, name string) (*containe
 	return snap, nil
 }
 
-func (m *Monitor) handleLimited(c *models.Container) {
+func (m *Monitor) handleLimited(c *models.Container, currentGB float64) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -462,8 +496,7 @@ func (m *Monitor) handleLimited(c *models.Container) {
 	}
 
 	if err := m.lxcClient.SetContainerBandwidth(ctx, c.Name, speed, speed); err != nil {
-		logger.Error("容器限速失败 %s: %v", c.Name, err)
-		return
+		return fmt.Errorf("设置限速失败: %v", err)
 	}
 
 	logger.OK("容器流量超限已限速至 %dMbit: %s", speed, c.Name)
@@ -471,25 +504,70 @@ func (m *Monitor) handleLimited(c *models.Container) {
 	if mgr := plugin.GetManager(); mgr != nil {
 		mgr.GetHookManager().TriggerAsync(plugin.HookTrafficOverLimit, ctx, map[string]interface{}{
 			"name":    c.Name,
-			"current": uint64(c.TrafficUsage * 1024 * 1024 * 1024),
+			"current": uint64(currentGB * 1024 * 1024 * 1024),
 			"limit":   uint64(c.TrafficLimit) * 1024 * 1024 * 1024,
 			"action":  "limited",
 			"speed":   speed,
 		})
 	}
+
+	return nil
 }
 
 // restoreSpeed 恢复容器原始入站/出站带宽（流量重置或解除限速时调用）
 // 原始值为 0 表示该方向不限速，由 SetContainerBandwidth 删除对应的 limits 键。
-func (m *Monitor) restoreSpeed(container *models.Container) {
+func (m *Monitor) restoreSpeed(container *models.Container) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := m.lxcClient.SetContainerBandwidth(ctx, container.Name, container.Ingress, container.Egress); err != nil {
-		logger.Error("恢复容器带宽失败 %s: %v", container.Name, err)
-		return
+		return fmt.Errorf("恢复容器带宽失败: %v", err)
 	}
 	logger.OK("已恢复容器原始带宽: %s", container.Name)
+	return nil
+}
+
+// needsBandwidthRestore 判断重置流量前是否需要把带宽恢复回数据库记录值。
+// frozen 容器可能残留限速配置（例如限速后被手动暂停），也需要恢复。
+func needsBandwidthRestore(c *models.Container) bool {
+	return c.Status == "limited" || c.Status == "frozen" || c.TrafficOver
+}
+
+// reconcileBandwidth 对“已经不再超限、但带宽恢复失败”的容器重试恢复带宽，
+// 避免一次 Incus 抖动导致容器永久停留在限速值。
+func (m *Monitor) reconcileBandwidth(c *models.Container, state *containerUsageSnapshot) {
+	if !c.TrafficOver {
+		return
+	}
+	if c.TrafficLimit > 0 && c.TrafficUsage >= float64(c.TrafficLimit) {
+		// 仍在超限状态，限速是预期行为
+		return
+	}
+
+	if err := m.restoreSpeed(c); err != nil {
+		logger.Warn("重试恢复容器带宽失败 %s: %v", c.Name, err)
+		return
+	}
+
+	updates := map[string]interface{}{
+		"traffic_over": false,
+	}
+
+	// frozen 容器只恢复带宽，不改变暂停状态；是否是超限冻结由 traffic_over 判断。
+	if c.Status != "frozen" {
+		status := "stopped"
+		if state != nil && state.Status == "Running" {
+			status = "running"
+		}
+		updates["status"] = status
+	}
+
+	if err := db.DB.Model(&models.Container{}).Where("name = ?", c.Name).Updates(updates).Error; err != nil {
+		logger.Error("更新容器带宽恢复状态失败 %s: %v", c.Name, err)
+		return
+	}
+
+	logger.OK("容器带宽已自动对账恢复: %s", c.Name)
 }
 
 func (m *Monitor) handleOverLimit(containerName string, current float64, limit int) {
@@ -547,7 +625,9 @@ func (m *Monitor) GetTraffic(containerName string) (*TrafficInfo, error) {
 	}, nil
 }
 
-// maybeAutoResetTraffic 仅在跨月时才真正执行重置查询，其余周期零开销快速返回。
+// maybeAutoResetTraffic 控制自动重置的执行时机：
+//   - 当天/当月已经成功完成过一次全量重置时直接返回；
+//   - 上一轮存在失败时，按 resetRetryInterval 重试，而不是等到下一个周期。
 func (m *Monitor) maybeAutoResetTraffic() {
 	now := time.Now()
 	curMonth := now.Year()*100 + int(now.Month())
@@ -555,50 +635,49 @@ func (m *Monitor) maybeAutoResetTraffic() {
 	if m.lastResetMonth == curMonth && m.lastResetDay == curDay {
 		return
 	}
-	m.autoResetTraffic()
-}
 
-func (m *Monitor) autoResetTraffic() {
-	now := time.Now()
-	firstDayOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
-	m.lastResetMonth = now.Year()*100 + int(now.Month())
-	m.lastResetDay = m.lastResetMonth*100 + now.Day()
-
-	var containers []models.Container
-	// 具备补偿机制：记录到本月首日之前未重置或从未重置的都视为待重置
-	if err := db.DB.Select("name", "status", "traffic_over", "last_reset", "traffic_reset_cycle", "traffic_over_action", "ingress", "egress").
-		Find(&containers).Error; err != nil {
-		logger.Error("查询待重置流量记录失败: %v", err)
+	// 上一轮失败过：按重试间隔退避，避免每个监控周期都查询全表
+	if !m.lastResetAttempt.IsZero() && now.Sub(m.lastResetAttempt) < resetRetryInterval {
 		return
 	}
 
+	m.lastResetAttempt = now
+	if m.autoResetTraffic() {
+		m.lastResetMonth = curMonth
+		m.lastResetDay = curDay
+	}
+}
+
+// autoResetTraffic 执行一轮自动重置，返回是否全部成功。
+// 只要存在失败（查询、取状态、写库），调用方就不会推进天/月标记，
+// 下一轮会重新扫描，已成功的容器因 last_reset 已更新会被跳过。
+func (m *Monitor) autoResetTraffic() bool {
+	now := time.Now()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	firstDayOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+
+	var containers []models.Container
+	// 只查询本周期需要重置的行：
+	// - daily: last_reset 早于今天
+	// - 其他（含空字符串）: last_reset 早于本月1号
+	if err := db.DB.Select("name", "status", "traffic_over", "last_reset", "traffic_reset_cycle", "traffic_over_action", "ingress", "egress").
+		Where("traffic_reset_cycle = ? AND (last_reset IS NULL OR last_reset < ?)", "daily", today).
+		Or("(traffic_reset_cycle IS NULL OR traffic_reset_cycle <> ?) AND (last_reset IS NULL OR last_reset < ?)", "daily", firstDayOfMonth).
+		Find(&containers).Error; err != nil {
+		logger.Error("查询待重置流量记录失败: %v", err)
+		return false
+	}
+
+	failures := 0
 
 	for _, container := range containers {
-		needsReset := false
-		if container.TrafficResetCycle == "daily" {
-			if container.LastReset.Before(today) || container.LastReset.IsZero() {
-				needsReset = true
-			}
-		} else {
-			if container.LastReset.Before(firstDayOfMonth) || container.LastReset.IsZero() {
-				needsReset = true
-			}
-		}
-		if !needsReset {
-			continue
-		}
-
-		if container.Status == "frozen" && !container.TrafficOver {
-			continue
-		}
-
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		state, err := m.getContainerState(ctx, container.Name)
 		cancel()
 
 		if err != nil {
 			logger.Error("重置容器流量时获取网卡状态失败 %s: %v", container.Name, err)
+			failures++
 			continue
 		}
 
@@ -606,23 +685,83 @@ func (m *Monitor) autoResetTraffic() {
 			"rx_bytes":      int64(state.RxBytes),
 			"tx_bytes":      int64(state.TxBytes),
 			"traffic_usage": 0.0,
-			"traffic_over":        false,
 			"last_reset":    now,
 		}
+
+		// frozen 容器可能残留限速配置（例如限速后被手动暂停），因此也需要恢复带宽。
+		// 这里采用 best-effort：失败只告警，不阻塞统计重置。
 		if container.Status == "frozen" {
-			updates["status"] = "stopped"
-		} else if container.Status == "limited" {
+			if err := m.restoreSpeed(&container); err != nil {
+				// 恢复失败时保留 traffic_over，交给 reconcileBandwidth 继续重试，
+				// 避免带宽永久停留在限速值。
+				logger.Warn("冻结容器恢复带宽失败 %s: %v，保留标记等待重试", container.Name, err)
+				updates["traffic_over"] = container.TrafficOver
+			} else {
+				updates["traffic_over"] = false
+			}
+
+			// 超限冻结的容器重置后自动开机；手动暂停的保持 frozen 不开机。
+			if container.TrafficOver {
+				runCtx, runCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				startErr := m.lxcClient.StartContainer(runCtx, container.Name)
+				runCancel()
+
+				switch {
+				case startErr == nil:
+					updates["status"] = "running"
+					logger.OK("流量重置后已自动开机: %s", container.Name)
+				case strings.Contains(startErr.Error(), "already running"):
+					updates["status"] = "running"
+					logger.Info("容器已在运行中，跳过自动开机: %s", container.Name)
+				default:
+					updates["status"] = "stopped"
+					logger.Error("流量重置后自动开机失败 %s: %v", container.Name, startErr)
+				}
+			}
+
+			if err := db.DB.Model(&models.Container{}).Where("name = ?", container.Name).Updates(updates).Error; err != nil {
+				logger.Error("重置容器流量失败 %s: %v", container.Name, err)
+				failures++
+				continue
+			}
+			logger.OK("容器流量已自动重置: %s", container.Name)
+			continue
+		}
+
+		// 非 frozen：需要恢复带宽时先执行 Incus 操作，成功后才清除限速标记。
+		// 否则会出现“数据库显示已恢复、容器实际仍被限速”的假成功，
+		// 且 status 已变成 running 后再也不会触发 restoreSpeed。
+		if needsBandwidthRestore(&container) {
+			if err := m.restoreSpeed(&container); err != nil {
+				logger.Error("容器 %s 流量已清零但带宽恢复失败，保留限速状态等待自动重试: %v", container.Name, err)
+				if err := db.DB.Model(&models.Container{}).Where("name = ?", container.Name).Updates(updates).Error; err != nil {
+					logger.Error("重置容器流量失败 %s: %v", container.Name, err)
+					failures++
+				}
+				continue
+			}
+		}
+
+		updates["traffic_over"] = false
+		if container.Status == "limited" {
 			updates["status"] = "running"
-			m.restoreSpeed(&container)
 		}
 
 		if err := db.DB.Model(&models.Container{}).Where("name = ?", container.Name).Updates(updates).Error; err != nil {
 			logger.Error("重置容器流量失败 %s: %v", container.Name, err)
+			failures++
 			continue
 		}
 
 		logger.OK("容器流量已自动重置: %s", container.Name)
 	}
+
+	if failures > 0 {
+		logger.Warn("自动重置流量有 %d 个容器失败，将在 %v 后重试", failures, resetRetryInterval)
+		return false
+	}
+
+	return true
 }
 
 func (m *Monitor) ResetTraffic(containerName string) error {
@@ -634,20 +773,23 @@ func (m *Monitor) ResetTraffic(containerName string) error {
 	}
 
 	var container models.Container
-	if err := db.DB.Select("name", "status", "traffic_limit", "traffic_reset_cycle", "ingress", "egress").
+	if err := db.DB.Select("name", "status", "traffic_limit", "traffic_reset_cycle", "traffic_over", "ingress", "egress").
 		Where("name = ?", containerName).First(&container).Error; err != nil {
 		return fmt.Errorf("容器不存在: %v", err)
 	}
 
-	if container.Status == "limited" {
-		m.restoreSpeed(&container)
+	// 带宽恢复失败时直接返回错误并保留限速标记，避免数据库显示成功、容器仍被限速。
+	if needsBandwidthRestore(&container) {
+		if err := m.restoreSpeed(&container); err != nil {
+			return fmt.Errorf("恢复容器带宽失败，流量未重置: %v", err)
+		}
 	}
 
 	err = db.DB.Model(&models.Container{}).Where("name = ?", containerName).Updates(map[string]interface{}{
 		"rx_bytes":      int64(state.RxBytes),
 		"tx_bytes":      int64(state.TxBytes),
 		"traffic_usage": 0.0,
-		"traffic_over":        false,
+		"traffic_over":  false,
 		"last_reset":    time.Now(),
 	}).Error
 
@@ -671,6 +813,14 @@ func (m *Monitor) ResetTraffic(containerName string) error {
 		logger.OK("重置流量后已自动开机: %s", containerName)
 	}
 
-	logger.OK("流量统计已重置: %s (重置日期: 每月1号)", containerName)
+	cycle := "月度"
+	if strings.EqualFold(strings.TrimSpace(container.TrafficResetCycle), "daily") {
+		cycle = "每日"
+	}
+
+	logger.OK("流量统计已重置: %s (周期: %s, 时间: %s)",
+		containerName,
+		cycle,
+		time.Now().Format("2006-01-02 15:04:05"))
 	return nil
 }

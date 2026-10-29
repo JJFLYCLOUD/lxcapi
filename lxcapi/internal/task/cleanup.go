@@ -40,8 +40,8 @@ func CleanupOldTasks(days int) {
 
 	cutoffTime := time.Now().AddDate(0, 0, -days)
 
-	result := db.DB.Where("created_at < ? AND (status = ? OR status = ? OR status = ?)", 
-		cutoffTime, "completed", "success", "failed").
+	result := db.DB.Where("created_at < ? AND status IN ?",
+		cutoffTime, []string{"completed", "success", "failed", "cancelled"}).
 		Delete(&models.Task{})
 
 	if result.Error != nil {

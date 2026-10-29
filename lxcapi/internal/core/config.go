@@ -52,7 +52,6 @@ func (c *LoggerConfig) IsDebug() bool {
 
 type LXCConfig struct {
 	Socket  string `yaml:"socket"`
-	Timeout int    `yaml:"timeout"`
 	Storage string `yaml:"storage"`
 	Bridge  string `yaml:"bridge"`
 }

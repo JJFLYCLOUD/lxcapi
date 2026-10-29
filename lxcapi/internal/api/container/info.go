@@ -153,8 +153,10 @@ func Action(c *gin.Context) {
 			return
 		}
 
-		svc := service.NewContainerService()
-		if err := svc.ResetPassword(c.Request.Context(), name, req.Password); err != nil {
+		// 与管理端/系统端保持一致：走同步任务，获取容器锁并避免请求断开中断 Incus 操作。
+		if err := executor.CreateSyncTask(name, "reset_password", func(ctx context.Context) error {
+			return containerService.ResetPassword(ctx, name, req.Password)
+		}); err != nil {
 			response.Error(c, 500, err.Error())
 			return
 		}

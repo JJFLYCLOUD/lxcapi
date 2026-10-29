@@ -66,23 +66,28 @@ func RefreshContainerCache(ctx context.Context, name string) error {
 		return err
 	}
 
-	container.Status = strings.ToLower(info.Status)
-	now := time.Now()
-	container.LastSync = &now
-	if t, err := time.Parse(time.RFC3339, info.Created); err == nil {
-		container.CreatedAtLXD = &t
+	// 只更新来自 Incus 的运行时状态，避免整行 Save 覆盖监控线程并发写入的
+	// traffic_usage/rx_bytes/tx_bytes/traffic_over/last_reset，以及凭证、密码等字段。
+	// 注意：Incus 未返回的配置项不写入，保持数据库原值。
+	updates := map[string]interface{}{
+		"status":    strings.ToLower(info.Status),
+		"last_sync": time.Now(),
 	}
 
-	if image, ok := info.Config["image.description"].(string); ok {
-		container.Image = image
+	if t, err := time.Parse(time.RFC3339, info.Created); err == nil {
+		updates["created_at_lxd"] = t
+	}
+
+	if image, ok := info.Config["image.description"].(string); ok && image != "" {
+		updates["image"] = image
 	}
 
 	if cpuLimit, ok := info.Config["limits.cpu"].(string); ok {
-		container.CPU = parseCPULimit(cpuLimit)
+		updates["cpu"] = parseCPULimit(cpuLimit)
 	}
 
 	if memLimit, ok := info.Config["limits.memory"].(string); ok {
-		container.Memory = parseMemoryStringToMB(memLimit)
+		updates["memory"] = parseMemoryStringToMB(memLimit)
 	}
 
 	for _, devConfig := range info.Devices {
@@ -90,7 +95,7 @@ func RefreshContainerCache(ctx context.Context, name string) error {
 			if devType, ok := devMap["type"].(string); ok && devType == "disk" {
 				if path, ok := devMap["path"].(string); ok && path == "/" {
 					if size, ok := devMap["size"].(string); ok {
-						container.Disk = parseMemoryStringToMB(size)
+						updates["disk"] = parseMemoryStringToMB(size)
 					}
 				}
 			}
@@ -99,22 +104,22 @@ func RefreshContainerCache(ctx context.Context, name string) error {
 
 	if info.State != nil && info.Status == "Running" {
 		if memUsage, ok := info.State.Memory["usage"].(float64); ok {
-			container.MemoryUsageRaw = uint64(memUsage)
+			updates["memory_usage_raw"] = uint64(memUsage)
 		}
 
 		if diskUsage, ok := info.State.Disk["root"].(map[string]interface{}); ok {
 			if usage, ok := diskUsage["usage"].(float64); ok {
-				container.DiskUsageRaw = uint64(usage)
+				updates["disk_usage_raw"] = uint64(usage)
 			}
 		}
 	}
 
 	if info.Config != nil {
 		configJSON, _ := json.Marshal(info.Config)
-		container.ConfigJSON = string(configJSON)
+		updates["config_json"] = string(configJSON)
 	}
 
-	if err := db.DB.Save(&container).Error; err != nil {
+	if err := db.DB.Model(&models.Container{}).Where("name = ?", name).Updates(updates).Error; err != nil {
 		return fmt.Errorf("更新容器状态失败: %v", err)
 	}
 

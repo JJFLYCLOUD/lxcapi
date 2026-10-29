@@ -10,8 +10,9 @@ func ClearPendingTasks() {
 	result := db.DB.Model(&models.Task{}).
 		Where("status IN ?", []string{models.TaskQueued, models.TaskRunning}).
 		Updates(map[string]interface{}{
-			"status":    models.TaskFailed,
-			"error_msg": "服务重启，任务已清理",
+			"status":     models.TaskFailed,
+			"error_msg":  "服务重启，任务已清理",
+			"active_key": nil,
 		})
 	
 	if result.RowsAffected > 0 {

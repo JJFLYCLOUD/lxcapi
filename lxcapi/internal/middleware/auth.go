@@ -86,7 +86,13 @@ func ContainerAuth() gin.HandlerFunc {
 		var container models.Container
 		if err := db.DB.Where("name = ?", cred.ContainerName).First(&container).Error; err == nil &&
 			container.Status == "frozen" && c.Request.Method != "GET" {
-			response.Error(c, 401, "容器已暂停，无法进行任何操作")
+			reason := "container_frozen"
+			msg := "容器已暂停，无法进行任何操作"
+			if container.TrafficOver {
+				reason = "traffic_over"
+				msg = "容器流量已超限，无法进行任何操作"
+			}
+			response.ErrorWithData(c, 403, msg, gin.H{"reason": reason})
 			c.Abort()
 			return
 		}

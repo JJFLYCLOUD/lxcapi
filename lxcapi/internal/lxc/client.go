@@ -18,10 +18,17 @@ import (
 
 type Client struct {
 	socket     string
-	timeout    time.Duration
 	httpClient *http.Client
 	execPath   string
 }
+
+const (
+	// 本机 Unix socket 连接通常在毫秒级，5 秒足够。
+	defaultDialTimeout = 5 * time.Second
+
+	// 覆盖 waitForOperation 最长的 180 秒等待，并留出余量。
+	defaultRequestTimeout = 300 * time.Second
+)
 
 var (
 	defaultClientOnce sync.Once
@@ -40,16 +47,15 @@ func NewClient() *Client {
 	socketPath := cfg.SocketPath()
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return net.DialTimeout("unix", socketPath, time.Duration(cfg.Timeout)*time.Second)
+			return net.DialTimeout("unix", socketPath, defaultDialTimeout)
 		},
 	}
 	execPath, _ := exec.LookPath("incus")
 	return &Client{
-		socket:  socketPath,
-		timeout: time.Duration(cfg.Timeout) * time.Second,
+		socket: socketPath,
 		httpClient: &http.Client{
 			Transport: transport,
-			Timeout:   time.Duration(cfg.Timeout) * time.Second,
+			Timeout:   defaultRequestTimeout,
 		},
 		execPath: execPath,
 	}
