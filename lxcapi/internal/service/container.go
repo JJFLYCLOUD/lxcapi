@@ -338,19 +338,8 @@ func (s *ContainerService) UnlimitSpeed(ctx context.Context, name string) error 
 		return fmt.Errorf("容器不存在: %v", err)
 	}
 
-	ingress := ""
-	egress := ""
-	if container.Ingress > 0 {
-		ingress = fmt.Sprintf("%dMbit", container.Ingress)
-	}
-	if container.Egress > 0 {
-		egress = fmt.Sprintf("%dMbit", container.Egress)
-	}
-
-	if ingress != "" || egress != "" {
-		if err := s.lxcClient.UpdateContainerConfig(ctx, name, 0, "", "", ingress, egress, "", "", "", 0, nil, nil, nil); err != nil {
-			return fmt.Errorf("恢复容器带宽失败: %v", err)
-		}
+	if err := s.lxcClient.SetContainerBandwidth(ctx, name, container.Ingress, container.Egress); err != nil {
+		return fmt.Errorf("恢复容器带宽失败: %v", err)
 	}
 
 	status := "stopped"
@@ -851,8 +840,6 @@ func (s *ContainerService) UpdateConfig(ctx context.Context, name string, req *m
 	cpu := 0
 	memory := ""
 	disk := ""
-	ingress := ""
-	egress := ""
 	cpuAllowance := ""
 	ioRead := ""
 	ioWrite := ""
@@ -877,13 +864,11 @@ func (s *ContainerService) UpdateConfig(ctx context.Context, name string, req *m
 	}
 
 	if req.Ingress != nil && *req.Ingress >= 0 {
-		ingress = fmt.Sprintf("%dMbit", *req.Ingress)
 		dbUpdates["ingress"] = *req.Ingress
 		updated = append(updated, "ingress")
 	}
 
 	if req.Egress != nil && *req.Egress >= 0 {
-		egress = fmt.Sprintf("%dMbit", *req.Egress)
 		dbUpdates["egress"] = *req.Egress
 		updated = append(updated, "egress")
 	}
@@ -912,9 +897,27 @@ func (s *ContainerService) UpdateConfig(ctx context.Context, name string, req *m
 		updated = append(updated, "processes_limit")
 	}
 
-	if cpu > 0 || memory != "" || disk != "" || ingress != "" || egress != "" || cpuAllowance != "" || ioRead != "" || ioWrite != "" || processesLimit > 0 || req.Privileged != nil || req.MemorySwap != nil || req.AllowNesting != nil {
-		if err := s.lxcClient.UpdateContainerConfig(ctx, name, cpu, memory, disk, ingress, egress, cpuAllowance, ioRead, ioWrite, processesLimit, req.Privileged, req.MemorySwap, req.AllowNesting); err != nil {
+	if cpu > 0 || memory != "" || disk != "" || cpuAllowance != "" || ioRead != "" || ioWrite != "" || processesLimit > 0 || req.Privileged != nil || req.MemorySwap != nil || req.AllowNesting != nil {
+		if err := s.lxcClient.UpdateContainerConfig(ctx, name, cpu, memory, disk, cpuAllowance, ioRead, ioWrite, processesLimit, req.Privileged, req.MemorySwap, req.AllowNesting); err != nil {
 			return nil, fmt.Errorf("更新LXD配置失败: %v", err)
+		}
+	}
+
+	// 带宽统一走 SetContainerBandwidth：0 表示删除该方向限速，
+	// 未指定的一侧沿用数据库中的原始值，避免残留超限限速。
+	ingressSet := req.Ingress != nil && *req.Ingress >= 0
+	egressSet := req.Egress != nil && *req.Egress >= 0
+	if ingressSet || egressSet {
+		ingressMbit := container.Ingress
+		egressMbit := container.Egress
+		if ingressSet {
+			ingressMbit = *req.Ingress
+		}
+		if egressSet {
+			egressMbit = *req.Egress
+		}
+		if err := s.lxcClient.SetContainerBandwidth(ctx, name, ingressMbit, egressMbit); err != nil {
+			return nil, fmt.Errorf("更新容器带宽失败: %v", err)
 		}
 	}
 

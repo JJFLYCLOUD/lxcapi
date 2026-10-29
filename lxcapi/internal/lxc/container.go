@@ -285,7 +285,7 @@ func isInvalidIPv4(ip string) bool {
 	return false
 }
 
-func (c *Client) UpdateContainerConfig(ctx context.Context, name string, cpu int, memory, disk, ingress, egress, cpuAllowance, ioRead, ioWrite string, processesLimit int, privileged, memorySwap, allowNesting *bool) error {
+func (c *Client) UpdateContainerConfig(ctx context.Context, name string, cpu int, memory, disk, cpuAllowance, ioRead, ioWrite string, processesLimit int, privileged, memorySwap, allowNesting *bool) error {
 	logger.Info("更新容器配置: %s", name)
 
 	patch := map[string]interface{}{}
@@ -317,7 +317,7 @@ func (c *Client) UpdateContainerConfig(ctx context.Context, name string, cpu int
 	}
 
 	devices := map[string]interface{}{}
-	needDevices := ingress != "" || egress != "" || disk != "" || ioRead != "" || ioWrite != ""
+	needDevices := disk != "" || ioRead != "" || ioWrite != ""
 	var info *ContainerInfo
 	if needDevices {
 		var err error
@@ -325,21 +325,6 @@ func (c *Client) UpdateContainerConfig(ctx context.Context, name string, cpu int
 		if err != nil {
 			return fmt.Errorf("获取容器配置失败: %v", err)
 		}
-	}
-	if ingress != "" || egress != "" {
-		eth0 := map[string]interface{}{}
-		if devConfig, ok := info.Devices["eth0"].(map[string]interface{}); ok {
-			for k, v := range devConfig {
-				eth0[k] = v
-			}
-		}
-		if ingress != "" {
-			eth0["limits.ingress"] = ingress
-		}
-		if egress != "" {
-			eth0["limits.egress"] = egress
-		}
-		devices["eth0"] = eth0
 	}
 	if disk != "" || ioRead != "" || ioWrite != "" {
 		root := map[string]interface{}{}
@@ -374,6 +359,47 @@ func (c *Client) UpdateContainerConfig(ctx context.Context, name string, cpu int
 	}
 
 	logger.OK("容器配置更新成功: %s", name)
+	return nil
+}
+
+// SetContainerBandwidth 设置容器 eth0 带宽；值为 0 时删除该方向的限速键。
+func (c *Client) SetContainerBandwidth(ctx context.Context, name string, ingressMbit, egressMbit int) error {
+	logger.Info("更新容器带宽: %s (ingress=%dMbit, egress=%dMbit)", name, ingressMbit, egressMbit)
+
+	info, err := c.GetContainerInfo(ctx, name)
+	if err != nil {
+		return fmt.Errorf("获取容器配置失败: %v", err)
+	}
+
+	devConfig, ok := info.Devices["eth0"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("容器 %s 没有 eth0 设备", name)
+	}
+
+	eth0 := make(map[string]interface{}, len(devConfig)+2)
+	for k, v := range devConfig {
+		eth0[k] = v
+	}
+
+	if ingressMbit > 0 {
+		eth0["limits.ingress"] = fmt.Sprintf("%dMbit", ingressMbit)
+	} else {
+		delete(eth0, "limits.ingress")
+	}
+
+	if egressMbit > 0 {
+		eth0["limits.egress"] = fmt.Sprintf("%dMbit", egressMbit)
+	} else {
+		delete(eth0, "limits.egress")
+	}
+
+	if err := c.patch(ctx, fmt.Sprintf("/1.0/instances/%s", name), map[string]interface{}{
+		"devices": map[string]interface{}{"eth0": eth0},
+	}); err != nil {
+		return fmt.Errorf("更新容器带宽失败: %v", err)
+	}
+
+	logger.OK("容器带宽更新成功: %s", name)
 	return nil
 }
 

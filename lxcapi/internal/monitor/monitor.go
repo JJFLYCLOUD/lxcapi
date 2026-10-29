@@ -460,9 +460,8 @@ func (m *Monitor) handleLimited(c *models.Container) {
 	if speed <= 0 {
 		speed = 1
 	}
-	limit := fmt.Sprintf("%dMbit", speed)
 
-	if err := m.lxcClient.UpdateContainerConfig(ctx, c.Name, 0, "", "", limit, limit, "", "", "", 0, nil, nil, nil); err != nil {
+	if err := m.lxcClient.SetContainerBandwidth(ctx, c.Name, speed, speed); err != nil {
 		logger.Error("容器限速失败 %s: %v", c.Name, err)
 		return
 	}
@@ -481,23 +480,12 @@ func (m *Monitor) handleLimited(c *models.Container) {
 }
 
 // restoreSpeed 恢复容器原始入站/出站带宽（流量重置或解除限速时调用）
+// 原始值为 0 表示该方向不限速，由 SetContainerBandwidth 删除对应的 limits 键。
 func (m *Monitor) restoreSpeed(container *models.Container) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	ingress := ""
-	egress := ""
-	if container.Ingress > 0 {
-		ingress = fmt.Sprintf("%dMbit", container.Ingress)
-	}
-	if container.Egress > 0 {
-		egress = fmt.Sprintf("%dMbit", container.Egress)
-	}
-	if ingress == "" && egress == "" {
-		return
-	}
-
-	if err := m.lxcClient.UpdateContainerConfig(ctx, container.Name, 0, "", "", ingress, egress, "", "", "", 0, nil, nil, nil); err != nil {
+	if err := m.lxcClient.SetContainerBandwidth(ctx, container.Name, container.Ingress, container.Egress); err != nil {
 		logger.Error("恢复容器带宽失败 %s: %v", container.Name, err)
 		return
 	}
