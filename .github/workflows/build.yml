@@ -1,0 +1,75 @@
+name: Build Binaries
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: lxcapi/go.mod
+          cache-dependency-path: lxcapi/go.sum
+
+      - name: Install Swag
+        run: |
+          go install github.com/swaggo/swag/cmd/swag@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Download Dependencies
+        run: |
+          cd lxcapi
+          go mod tidy
+          go mod download
+
+      - name: Generate Swagger Docs
+        run: |
+          cd lxcapi
+          swag init -g cmd/lxcapi/main.go --output docs --parseDependency --parseInternal \
+            || echo "警告: swag 生成失败（未找到注解），已跳过"
+
+      - name: Prepare Embedded Resources
+        run: |
+          cd lxcapi
+          rm -rf cmd/lxcapi/templates cmd/lxcapi/docs cmd/lxcapi/static
+          cp -r ./lxdweb/templates cmd/lxcapi/
+          cp -r ./lxdweb/static cmd/lxcapi/
+
+      - name: Build linux/amd64
+        run: |
+          cd lxcapi/cmd/lxcapi
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ../../lxcapi-amd64 .
+          cd ../..
+          ls -lh lxcapi-amd64
+
+      - name: Build linux/arm64
+        run: |
+          cd lxcapi/cmd/lxcapi
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ../../lxcapi-arm64 .
+          cd ../..
+          ls -lh lxcapi-arm64
+
+      - name: Extract Version
+        run: |
+          echo "RELEASE_TAG=$(grep -oP 'Version\s*=\s*"\K[^"]+' lxcapi/pkg/version/version.go)" >> "$GITHUB_ENV"
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          files: |
+            lxcapi/lxcapi-amd64
+            lxcapi/lxcapi-arm64
