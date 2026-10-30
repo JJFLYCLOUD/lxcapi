@@ -53,6 +53,10 @@
         .modal-box { border-radius: 0.5rem !important; }
         .alert { border-radius: 0.375rem !important; }
 
+        #tabContent > div > .content-box:last-child {
+            margin-bottom: 0 !important;
+        }
+
         html::-webkit-scrollbar, body::-webkit-scrollbar { width: 0; height: 0; display: none; }
         html { scrollbar-width: none; -ms-overflow-style: none; }
     </style>
@@ -60,7 +64,7 @@
 <body class="text-gray-800" style="background-color: #f9fafb;">
     {{template "container/container_toast.html"}}
     <div class="relative">
-        <div class="container mx-auto px-4 py-8 pb-12 max-w-7xl relative" style="z-index: 1;">
+        <div class="container mx-auto px-4 pt-8 pb-0 max-w-7xl relative" style="z-index: 1;">
         
         <!-- Container Info Card -->
         <div class="content-box rounded-lg p-3 lg:p-4 mb-3 lg:mb-4">
