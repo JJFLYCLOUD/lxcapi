@@ -86,6 +86,35 @@
 </div>
 
 <script>
+    // 让容器管理 iframe 跟随内部页面高度，避免 iframe 固定 80vh 时底部出现大片空白。
+    window.addEventListener('message', function (event) {
+        var data = event.data;
+        if (!data || data.type !== 'lxcapi-iframe-height') {
+            return;
+        }
+
+        var iframe = document.getElementById('container-iframe');
+        if (!iframe) {
+            return;
+        }
+
+        try {
+            var iframeOrigin = new URL(iframe.src).origin;
+            if (event.origin !== iframeOrigin) {
+                return;
+            }
+        } catch (e) {
+            return;
+        }
+
+        var height = parseInt(data.height, 10);
+        if (height > 0) {
+            iframe.style.height = height + 'px';
+        }
+    });
+</script>
+
+<script>
     function resetTraffic() {
         if (!confirm('确认支付 ¥{$reset_price} 重置本月已用流量？')) {
             return;

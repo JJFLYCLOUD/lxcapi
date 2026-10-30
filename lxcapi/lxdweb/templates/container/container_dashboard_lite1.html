@@ -1319,5 +1319,34 @@ function showAddIPv6MappingModal() {
         function parseMemorySize(s) { if(!s)return 0; const m=String(s).match(/^(\d+(?:\.\d+)?)\s*(MB|GB|KB|B)?$/i); if(!m)return 0; const v=parseFloat(m[1]), u=(m[2]||'B').toUpperCase(); const ks={'B':1,'KB':1024,'MB':1024**2,'GB':1024**3}; return v*(ks[u]||1); }
         function formatBytes(b) { if(b===0)return '0 B'; const k=1024, s=['B','KB','MB','GB','TB'], i=Math.floor(Math.log(b)/Math.log(k)); return parseFloat((b/Math.pow(k,i)).toFixed(2))+' '+s[i]; }
     </script>
+    <script>
+        // 被魔方财务等外部页面以 iframe 嵌入时，把实际内容高度通知父页面，
+        // 避免 iframe 固定高度导致底部出现空白。
+        (function () {
+            if (window.self === window.top) {
+                return;
+            }
+
+            function syncIframeHeight() {
+                // 只用 body 的内容高度：documentElement.scrollHeight 最小等于 iframe 视口，
+                // 会导致 iframe 无法从 80vh 缩小。
+                var height = Math.max(
+                    document.body.scrollHeight,
+                    document.body.offsetHeight
+                );
+                window.parent.postMessage({
+                    type: 'lxcapi-iframe-height',
+                    height: height
+                }, '*');
+            }
+
+            window.addEventListener('load', syncIframeHeight);
+            window.addEventListener('resize', syncIframeHeight);
+
+            if (window.ResizeObserver) {
+                new ResizeObserver(syncIframeHeight).observe(document.body);
+            }
+        })();
+    </script>
 </body>
 </html>
