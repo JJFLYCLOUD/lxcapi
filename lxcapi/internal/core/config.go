@@ -51,9 +51,8 @@ func (c *LoggerConfig) IsDebug() bool {
 }
 
 type LXCConfig struct {
-	Socket  string `yaml:"socket"`
-	Storage string `yaml:"storage"`
-	Bridge  string `yaml:"bridge"`
+	Socket string `yaml:"socket"`
+	Bridge string `yaml:"bridge"`
 }
 
 const defaultLXCSocket = "/var/lib/incus/unix.socket"

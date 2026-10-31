@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"fmt"
 	"lxcapi/internal/cache"
-	"lxcapi/internal/core"
 	"lxcapi/internal/db"
 	"lxcapi/internal/ipv4"
 	"lxcapi/internal/ipv6"
@@ -149,13 +148,7 @@ func (s *ContainerService) Create(ctx context.Context, req *models.CreateContain
 		ioWrite = fmt.Sprintf("%dMB", req.IOWrite)
 	}
 	
-	storagePool := core.GlobalConfig.LXC.Storage
-	if storagePool == "" {
-		storagePool = "default"
-	}
-	logger.Info("使用存储池: %s", storagePool)
-	
-	if err := s.lxcClient.CreateContainerWithConfig(ctx, req.Name, req.Image, storagePool, req.CPU, memory, disk, ingress, egress, req.AllowNesting, req.MemorySwap, req.Privileged, "", cpuAllowance, ioRead, ioWrite, req.ProcessesLimit); err != nil {
+	if err := s.lxcClient.CreateContainerWithConfig(ctx, req.Name, req.Image, req.CPU, memory, disk, ingress, egress, req.AllowNesting, req.MemorySwap, req.Privileged, "", cpuAllowance, ioRead, ioWrite, req.ProcessesLimit); err != nil {
 		return fmt.Errorf("创建容器失败: %v", err)
 	}
 	

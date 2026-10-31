@@ -56,8 +56,6 @@ system:
 lxc:
   # Incus Socket路径（留空则使用 /var/lib/incus/unix.socket）
   socket: "/var/lib/incus/unix.socket"
-  # 默认存储池(留空则使用 default)
-  storage: "default"
   # 默认网桥名称(留空则使用 incusbr0)
   bridge: "incusbr0"
 

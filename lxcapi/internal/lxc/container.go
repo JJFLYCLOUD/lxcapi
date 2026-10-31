@@ -35,8 +35,8 @@ func (c *Client) GetContainerMAC(ctx context.Context, name string) (string, erro
 	return "", fmt.Errorf("未找到MAC地址")
 }
 
-func (c *Client) CreateContainerWithConfig(ctx context.Context, name, image, storagePool string, cpu int, memory, disk, ingress, egress string, allowNesting, memorySwap, privileged bool, macAddress, cpuAllowance, ioRead, ioWrite string, processesLimit int) error {
-	logger.Info("创建容器: %s, 镜像: %s, 存储池: %s", name, image, storagePool)
+func (c *Client) CreateContainerWithConfig(ctx context.Context, name, image string, cpu int, memory, disk, ingress, egress string, allowNesting, memorySwap, privileged bool, macAddress, cpuAllowance, ioRead, ioWrite string, processesLimit int) error {
+	logger.Info("创建容器: %s, 镜像: %s", name, image)
 
 	config := map[string]interface{}{}
 	if cpu > 0 {
@@ -59,7 +59,6 @@ func (c *Client) CreateContainerWithConfig(ctx context.Context, name, image, sto
 		"root": map[string]interface{}{
 			"type": "disk",
 			"path": "/",
-			"pool": storagePool,
 		},
 	}
 	if disk != "" {
