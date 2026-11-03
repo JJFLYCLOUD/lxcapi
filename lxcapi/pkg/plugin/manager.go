@@ -91,29 +91,6 @@ func (m *Manager) RegisterRoutes(r *gin.Engine) {
 	}
 }
 
-func (m *Manager) GetPlugin(name string) (Plugin, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	p, exists := m.plugins[name]
-	return p, exists
-}
-
-func (m *Manager) ListPlugins() []map[string]string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	list := make([]map[string]string, 0, len(m.plugins))
-	for _, p := range m.plugins {
-		list = append(list, map[string]string{
-			"name":        p.Name(),
-			"version":     p.Version(),
-			"description": p.Description(),
-		})
-	}
-	return list
-}
-
 func (m *Manager) GetHookManager() *HookManager {
 	return m.hookManager
 }

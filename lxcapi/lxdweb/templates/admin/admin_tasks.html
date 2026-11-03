@@ -74,7 +74,6 @@
                         <option value="reinstall">重装</option>
                         <option value="reset_password">重置密码</option>
                         <option value="update_config">配置更新</option>
-                        <option value="refresh_cache">缓存更新</option>
                     </select>
                 </div>
                 <div class="flex items-center gap-2">
@@ -335,7 +334,7 @@
                 const actionMap = {
                     'create': '创建', 'delete': '删除', 'start': '启动', 'stop': '停止',
                     'restart': '重启', 'pause': '暂停', 'resume': '恢复', 'reinstall': '重装',
-                    'reset_password': '重置密码', 'update_config': '配置更新', 'refresh_cache': '缓存更新', 'refresh_ip': '刷新IP'
+                    'reset_password': '重置密码', 'update_config': '配置更新', 'refresh_ip': '刷新IP'
                 };
                 const actionText = actionMap[task.action] || task.action;
 
@@ -373,7 +372,7 @@
             const actionMap = {
                 'create': '创建', 'delete': '删除', 'start': '启动', 'stop': '停止',
                 'restart': '重启', 'pause': '暂停', 'resume': '恢复', 'reinstall': '重装',
-                'reset_password': '重置密码', 'update_config': '配置更新', 'refresh_cache': '缓存更新', 'refresh_ip': '刷新IP'
+                'reset_password': '重置密码', 'update_config': '配置更新', 'refresh_ip': '刷新IP'
             };
 
             let details = `<div class="space-y-2 text-sm">`;
@@ -457,7 +456,7 @@
                 const actionMap = {
                     'create': '创建', 'delete': '删除', 'start': '启动', 'stop': '停止',
                     'restart': '重启', 'pause': '暂停', 'resume': '恢复', 'reinstall': '重装',
-                    'reset_password': '重置密码', 'update_config': '配置更新', 'refresh_cache': '缓存更新', 'refresh_ip': '刷新IP'
+                    'reset_password': '重置密码', 'update_config': '配置更新', 'refresh_ip': '刷新IP'
                 };
                 
                 const statusMap = {

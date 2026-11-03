@@ -166,25 +166,6 @@ func (m *Manager) findNftHandlesByGroups(table, chain string, groups [][]string)
 	return handles
 }
 
-func (m *Manager) deleteNftHandles(table, chain string, groups [][]string) int {
-	deleted := 0
-	for {
-		handles := m.findNftHandlesByGroups(table, chain, groups)
-		if len(handles) == 0 {
-			break
-		}
-		for _, handle := range handles {
-			cmd := exec.Command("nft", "delete", "rule", "inet", table, chain, "handle", handle)
-			if err := cmd.Run(); err != nil {
-				logger.Error("nft删除规则失败: %v", err)
-			} else {
-				deleted++
-			}
-		}
-	}
-	return deleted
-}
-
 func (m *Manager) addSNAT(publicIP, containerIP, iface string) error {
 	cmd := exec.Command("nft", "add", "rule", "inet", "lxcip", "postrouting",
 		"ip", "saddr", containerIP, "oifname", iface, "snat", "to", publicIP)
@@ -212,15 +193,6 @@ func (m *Manager) removeSNAT(publicIP, containerIP, iface string) error {
 	if handle != "" {
 		exec.Command("nft", "delete", "rule", "inet", "lxcip", "postrouting", "handle", handle).Run()
 		logger.Info("nft删除SNAT规则: %s -> %s handle %s", containerIP, publicIP, handle)
-	}
-	return nil
-}
-
-func (m *Manager) removeDNAT(publicIP, containerIP, iface string) error {
-	handle := m.findNftHandle("lxcip", "prerouting", publicIP, containerIP)
-	if handle != "" {
-		exec.Command("nft", "delete", "rule", "inet", "lxcip", "prerouting", "handle", handle).Run()
-		logger.Info("nft删除DNAT规则: %s -> %s handle %s", publicIP, containerIP, handle)
 	}
 	return nil
 }

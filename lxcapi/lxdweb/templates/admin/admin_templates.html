@@ -30,7 +30,7 @@
                     <span class="iconify text-blue-600" data-icon="mdi:image-multiple" data-width="28"></span>
                     镜像模板管理
                 </h1>
-                <p class="text-sm lg:text-base text-gray-600 mt-1">管理LXD容器镜像模板</p>
+                <p class="text-sm lg:text-base text-gray-600 mt-1">管理LXC容器镜像模板</p>
             </div>
             <div class="flex gap-2">
                 <button onclick="syncTemplates()" class="px-3 py-2 text-xs lg:text-sm font-medium text-gray-700 content-box hover:bg-gray-50 border border-gray-200 rounded-lg transition flex items-center justify-center gap-2">
@@ -171,7 +171,7 @@
 
         function renderTemplates() {
             if (filteredData.length === 0) {
-                $('#templatesContent').html('<p class="text-center py-8 text-gray-500">暂无模板，请点击"同步模板"从LXD获取</p>');
+                $('#templatesContent').html('<p class="text-center py-8 text-gray-500">暂无模板，请点击"同步模板"从LXC获取</p>');
                 return;
             }
 
@@ -332,9 +332,9 @@
         }
 
         function syncTemplates() {
-            if (!confirm('确认要从LXD同步镜像模板吗？这将获取所有本地镜像并更新到数据库。')) return;
+            if (!confirm('确认要从LXC同步镜像模板吗？这将获取所有本地镜像并更新到数据库。')) return;
 
-            showToast('info', '正在从LXD同步镜像模板...');
+            showToast('info', '正在从LXC同步镜像模板...');
 
             $.ajax({
                 url: '/api/admin/templates/sync',

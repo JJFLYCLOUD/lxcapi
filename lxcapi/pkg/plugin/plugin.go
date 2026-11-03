@@ -50,15 +50,6 @@ func (h *HookManager) Register(point HookPoint, fn HookFunc) {
 	h.hooks[point] = append(h.hooks[point], fn)
 }
 
-func (h *HookManager) Trigger(point HookPoint, ctx context.Context, data map[string]interface{}) error {
-	for _, fn := range h.hooks[point] {
-		if err := fn(ctx, data); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (h *HookManager) TriggerAsync(point HookPoint, ctx context.Context, data map[string]interface{}) {
 	for _, fn := range h.hooks[point] {
 		go fn(ctx, data)

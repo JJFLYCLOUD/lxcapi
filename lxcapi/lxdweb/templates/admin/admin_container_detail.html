@@ -1609,7 +1609,6 @@
                         showToast('success', '流量统计已重置，容器已解锁');
                         setTimeout(() => {
                             loadContainerInfo();
-                            loadTrafficInfo();
                         }, 1000);
                     } else {
                         showToast('error', result.msg || '重置流量失败');

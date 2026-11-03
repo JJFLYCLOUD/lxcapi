@@ -3,7 +3,6 @@ package admin
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -491,11 +490,4 @@ func SaveNATConfig(c *gin.Context) {
 			"message": "配置保存成功",
 		})
 	}
-}
-
-func splitStringToSlice(s string) []string {
-	if s == "" {
-		return nil
-	}
-	return strings.Split(s, ",")
 }
