@@ -164,7 +164,7 @@ func (s *PortMappingService) AllocateV4Mapping(ctx context.Context, containerNam
 	}
 	containerIP := container.PrivateIP
 	if containerIP == "" {
-		return nil, fmt.Errorf("容器IP为空，请等待容器启动完成")
+		return nil, fmt.Errorf("容器IPv4为空，请执行刷新IP后重试")
 	}
 
 	mapping := &models.PortMappingV4{
@@ -203,7 +203,7 @@ func (s *PortMappingService) AllocateV6Mapping(ctx context.Context, containerNam
 	}
 	containerIP := container.PrivateIPv6
 	if containerIP == "" {
-		return nil, fmt.Errorf("容器IPv6为空，请等待容器启动完成")
+		return nil, fmt.Errorf("容器IPv6为空，请执行刷新IP后重试")
 	}
 
 	mapping := &models.PortMappingV6{

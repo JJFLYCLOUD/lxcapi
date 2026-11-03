@@ -478,57 +478,69 @@ func (s *ContainerService) Reinstall(ctx context.Context, name, image, password 
 		}
 	}
 
-	// 9. 获取并固定容器 IP
-	actualPrivateIP := s.getContainerIP(ctx, name)
-	actualPrivateIPv6 := s.getContainerIPv6(ctx, name)
-
-	updateFields := map[string]interface{}{
+	// 7. 更新镜像与状态（IP 已固定在 Incus NIC 配置中，重装后不再重新获取）
+	if err := db.DB.Model(&models.Container{}).Where("name = ?", name).Updates(map[string]interface{}{
 		"image":  imageAlias,
 		"status": "running",
+	}).Error; err != nil {
+		logger.Warn("更新容器信息失败: %v", err)
 	}
 
-	if actualPrivateIP != "" {
-		if actualPrivateIP != container.PrivateIP {
-			logger.Warn("容器重装后内网IPv4发生变化: %s -> %s", container.PrivateIP, actualPrivateIP)
-			updateFields["private_ip"] = actualPrivateIP
-			s.updateContainerIPv4Rules(name, container.PrivateIP, actualPrivateIP)
-		} else {
-			logger.OK("容器内网IPv4保持不变: %s", actualPrivateIP)
-		}
-		if err := s.lxcClient.SetContainerIPv4Address(ctx, name, actualPrivateIP); err != nil {
+	logger.OK("容器重装完成: %s", name)
+	return nil
+}
+
+// RefreshIP 重新从 Incus 读取容器内网 IP，并重绑独立 IPv4、重建端口映射规则。
+// 仅在容器运行时可执行；IP 为空时提示联系管理员。
+func (s *ContainerService) RefreshIP(ctx context.Context, name string) (map[string]string, error) {
+	var container models.Container
+	if err := db.DB.Where("name = ?", name).First(&container).Error; err != nil {
+		return nil, fmt.Errorf("容器不存在: %s", name)
+	}
+
+	if !s.lxcClient.ContainerExists(ctx, name) {
+		return nil, fmt.Errorf("容器在 Incus 中不存在: %s", name)
+	}
+
+	status, err := s.lxcClient.GetContainerStatus(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("获取容器状态失败: %v", err)
+	}
+	if status != "Running" {
+		return nil, fmt.Errorf("请启动容器")
+	}
+
+	actualIPv4 := s.getContainerIP(ctx, name)
+	actualIPv6 := s.getContainerIPv6(ctx, name)
+	if actualIPv4 == "" && actualIPv6 == "" {
+		return nil, fmt.Errorf("未获取到容器IP，请联系管理员")
+	}
+
+	updates := make(map[string]interface{})
+
+	if actualIPv4 != "" {
+		if err := s.lxcClient.SetContainerIPv4Address(ctx, name, actualIPv4); err != nil {
 			logger.Warn("固定容器IPv4地址失败: %v", err)
 		}
+		updates["private_ip"] = actualIPv4
+		s.updateContainerIPv4Rules(name, container.PrivateIP, actualIPv4)
 	}
 
-	if actualPrivateIPv6 != "" {
-		if actualPrivateIPv6 != container.PrivateIPv6 {
-			logger.Warn("容器重装后内网IPv6发生变化: %s -> %s", container.PrivateIPv6, actualPrivateIPv6)
-			updateFields["private_ipv6"] = actualPrivateIPv6
-			s.updateContainerIPv6Rules(name, container.PrivateIPv6, actualPrivateIPv6)
-		} else {
-			logger.OK("容器内网IPv6保持不变: %s", actualPrivateIPv6)
-		}
+	if actualIPv6 != "" {
+		updates["private_ipv6"] = actualIPv6
+		s.updateContainerIPv6Rules(name, container.PrivateIPv6, actualIPv6)
 	}
 
-	// 10. 更新数据库
-	db.DB.Model(&models.Container{}).Where("name = ?", name).Updates(updateFields)
-
-	// 11. 后台重试获取 IP
-	needRetryIPv4 := actualPrivateIP == ""
-	needRetryIPv6 := actualPrivateIPv6 == ""
-	if needRetryIPv4 || needRetryIPv6 {
-		logger.Info("启动后台任务获取容器IP (IPv4: %v, IPv6: %v)", needRetryIPv4, needRetryIPv6)
-		retryCtx, done := startIPRetry(name)
-		go func() {
-			defer done()
-			s.retryGetContainerIPs(retryCtx, name, needRetryIPv4, needRetryIPv6, container.PrivateIP, container.PrivateIPv6)
-		}()
+	if err := db.DB.Model(&models.Container{}).Where("name = ?", name).Updates(updates).Error; err != nil {
+		return nil, fmt.Errorf("更新容器IP失败: %v", err)
 	}
 
-	logger.OK("容器重装完成: %s (IPv4: %s, IPv6: %s)", name,
-		func() string { if actualPrivateIP != "" { return actualPrivateIP } else { return "等待获取" } }(),
-		func() string { if actualPrivateIPv6 != "" { return actualPrivateIPv6 } else { return "等待获取" } }())
-	return nil
+	if err := cache.RefreshContainerCache(ctx, name); err != nil {
+		logger.Warn("刷新容器缓存失败 %s: %v", name, err)
+	}
+
+	logger.OK("容器IP已刷新: %s (IPv4: %s, IPv6: %s)", name, actualIPv4, actualIPv6)
+	return map[string]string{"ipv4": actualIPv4, "ipv6": actualIPv6}, nil
 }
 
 func (s *ContainerService) Delete(ctx context.Context, name string) error {

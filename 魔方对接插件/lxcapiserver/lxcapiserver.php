@@ -500,102 +500,6 @@ function lxcapiserver_UnsuspendAccount($params)
     return ['status' => 'error', 'msg' => $res['msg'] ?? '恢复失败'];
 }
 
-function lxcapiserver_Status($params)
-{
-    $containerName = is_array($params['domain']) ? $params['domain'][0] : $params['domain'];
-    lxcapiserver_debug('查询状态', ['domain' => $containerName]);
-    
-    $endpoint = '/api/system/containers/' . urlencode($containerName);
-    $res = lxcapiserver_ApiRequest($params, $endpoint, [], 'GET');
-    
-    if ($res === null) {
-        return ['status' => 'error', 'msg' => '请求失败'];
-    }
-    
-    if (isset($res['code']) && $res['code'] == 200 && isset($res['data']['status'])) {
-        $containerStatus = $res['data']['status'];
-        $result = ['status' => 'success'];
-
-        $containerInfo = $res['data']['container'] ?? [];
-        $dbStatus = strtolower($containerInfo['Status'] ?? ($containerInfo['status'] ?? ''));
-        $trafficOver = !empty($containerInfo['traffic_over']);
-
-        if ($trafficOver && $dbStatus === 'frozen') {
-            $result['data']['status'] = 'suspend';
-            $result['data']['des'] = '流量超限已暂停';
-            return $result;
-        }
-        if ($trafficOver || $dbStatus === 'limited') {
-            $result['data']['status'] = 'on';
-            $result['data']['des'] = '流量超限已限速';
-            return $result;
-        }
-
-        switch (strtoupper($containerStatus)) {
-            case 'RUNNING':
-                $result['data']['status'] = 'on';
-                $result['data']['des'] = '运行中';
-                break;
-            case 'STOPPED':
-                $result['data']['status'] = 'off';
-                $result['data']['des'] = '已停止';
-                break;
-            case 'FROZEN':
-                $result['data']['status'] = 'suspend';
-                $result['data']['des'] = '已暂停';
-                break;
-            default:
-                $result['data']['status'] = 'unknown';
-                $result['data']['des'] = '未知状态';
-                break;
-        }
-        
-        return $result;
-    }
-    
-    return ['status' => 'error', 'msg' => $res['msg'] ?? '查询失败'];
-}
-
-function lxcapiserver_Sync($params)
-{
-    $containerName = is_array($params['domain']) ? $params['domain'][0] : $params['domain'];
-    lxcapiserver_debug('同步容器信息', ['domain' => $containerName]);
-    
-    $endpoint = '/api/system/containers/' . urlencode($containerName);
-    $res = lxcapiserver_ApiRequest($params, $endpoint, [], 'GET');
-    
-    if ($res === null) {
-        return ['status' => 'error', 'msg' => '请求失败'];
-    }
-    
-    if (isset($res['code']) && $res['code'] == 200) {
-        try {
-            $update = [];
-            
-            if (isset($res['data']['status'])) {
-                $containerStatus = strtoupper($res['data']['status']);
-                if ($containerStatus === 'RUNNING') {
-                    $update['domainstatus'] = 'Active';
-                } elseif ($containerStatus === 'STOPPED') {
-                    $update['domainstatus'] = 'Suspended';
-                }
-            }
-            
-            if (!empty($update)) {
-                Db::name('host')->where('id', $params['hostid'])->update($update);
-                lxcapiserver_debug('同步数据库状态成功', $update);
-            }
-            
-            return ['status' => 'success', 'msg' => '状态同步成功'];
-        } catch (\Exception $e) {
-            return ['status' => 'error', 'msg' => '同步失败: ' . $e->getMessage()];
-        }
-    }
-    
-    return ['status' => 'error', 'msg' => $res['msg'] ?? '同步失败'];
-}
-
-
 function lxcapiserver_Reinstall($params)
 {
     $containerName = is_array($params['domain']) ? $params['domain'][0] : $params['domain'];
@@ -628,11 +532,42 @@ function lxcapiserver_AdminButton($params)
 {
     if (!empty($params['domain'])) {
         return [
-            'Sync' => '同步状态',
+            'RefreshIP' => '刷新IP',
             'TrafficReset' => '重置流量',
         ];
     }
     return [];
+}
+
+function lxcapiserver_RefreshIP($params)
+{
+    $containerName = is_array($params['domain']) ? $params['domain'][0] : ($params['domain'] ?? '');
+    lxcapiserver_debug('刷新IP', ['domain' => $containerName]);
+
+    if (empty($containerName)) {
+        return ['status' => 'error', 'msg' => '容器信息不存在'];
+    }
+
+    $endpoint = '/api/system/containers/' . urlencode($containerName) . '/action?action=refresh-ip';
+    $res = lxcapiserver_ApiRequest($params, $endpoint, [], 'POST');
+
+    if ($res === null) {
+        return ['status' => 'error', 'msg' => '请求失败'];
+    }
+
+    if (isset($res['code']) && $res['code'] == 200) {
+        $data = $res['data'] ?? [];
+        $msg = 'IP已刷新';
+        if (!empty($data['ipv4'])) {
+            $msg .= '：IPv4 ' . $data['ipv4'];
+        }
+        if (!empty($data['ipv6'])) {
+            $msg .= '，IPv6 ' . $data['ipv6'];
+        }
+        return ['status' => 'success', 'msg' => $msg];
+    }
+
+    return ['status' => 'error', 'msg' => $res['msg'] ?? '刷新IP失败'];
 }
 
 function lxcapiserver_TrafficReset($params)

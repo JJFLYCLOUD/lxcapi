@@ -58,6 +58,15 @@ func AllocatePortMapping(c *gin.Context) {
 		return
 	}
 
+	if version == "v4" && container.PrivateIP == "" {
+		response.Error(c, 400, "容器IPv4为空，请执行刷新IP后重试")
+		return
+	}
+	if version == "v6" && container.PrivateIPv6 == "" {
+		response.Error(c, 400, "容器IPv6为空，请执行刷新IP后重试")
+		return
+	}
+
 	pmService := service.NewPortMappingService()
 
 	// 如果公网端口为0，随机分配

@@ -92,6 +92,7 @@
                 <button onclick="showResetPasswordModal()" class="px-2 py-1 lg:py-1.5 text-xs font-medium text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded transition whitespace-nowrap">重置密码</button>
                 <button onclick="showReinstallModal()" class="px-2 py-1 lg:py-1.5 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded transition whitespace-nowrap">重装系统</button>
                 <button onclick="showUpdateConfigModal()" class="px-2 py-1 lg:py-1.5 text-xs font-medium text-teal-700 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded transition whitespace-nowrap">更换配置</button>
+                <button onclick="refreshIP()" class="px-2 py-1 lg:py-1.5 text-xs font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded transition whitespace-nowrap">刷新IP</button>
 
                 <button onclick="resetTraffic()" class="px-2 py-1 lg:py-1.5 text-xs font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded transition whitespace-nowrap">重置流量</button>
                 <button onclick="deleteContainer()" class="px-2 py-1 lg:py-1.5 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded transition whitespace-nowrap">删除容器</button>
@@ -1561,6 +1562,36 @@
                     } else {
                         showToast('error', result.msg || 'IPv6释放失败');
                     }
+                }
+            });
+        }
+
+        function refreshIP() {
+            if (!containerData || containerData.status !== 'Running') {
+                showToast('error', '请启动容器');
+                return;
+            }
+            if (!confirm('确定要刷新容器IP吗？\n\n将重新读取容器当前IP，并重绑独立IP、重建端口映射规则。')) {
+                return;
+            }
+
+            showToast('info', '刷新IP中...');
+            $.ajax({
+                url: `/api/admin/containers/${encodeURIComponent(containerName)}/action?action=refresh-ip`,
+                type: 'POST',
+                success: function(result) {
+                    if (result.code === 200) {
+                        const data = result.data || {};
+                        showToast('success', `IP已刷新：IPv4 ${data.ipv4 || '无'}，IPv6 ${data.ipv6 || '无'}`);
+                        setTimeout(() => {
+                            loadContainerInfo();
+                        }, 1000);
+                    } else {
+                        showToast('error', result.msg || '刷新IP失败');
+                    }
+                },
+                error: function(xhr) {
+                    showToast('error', (xhr.responseJSON && xhr.responseJSON.msg) || '刷新IP失败');
                 }
             });
         }

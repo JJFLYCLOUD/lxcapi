@@ -252,6 +252,22 @@ func ContainerAction(c *gin.Context) {
 		}
 		response.Success(c, "密码重置成功")
 
+	case "refresh-ip":
+		var ips map[string]string
+		if err := executor.CreateSyncTask(name, "refresh_ip", func(ctx context.Context) error {
+			var refreshErr error
+			ips, refreshErr = containerService.RefreshIP(ctx, name)
+			return refreshErr
+		}); err != nil {
+			response.Error(c, 500, err.Error())
+			return
+		}
+		response.Success(c, gin.H{
+			"container": name,
+			"ipv4":      ips["ipv4"],
+			"ipv6":      ips["ipv6"],
+		})
+
 	default:
 		response.Error(c, 400, "不支持的操作类型: "+action)
 	}

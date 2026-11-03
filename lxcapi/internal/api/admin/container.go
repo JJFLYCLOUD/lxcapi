@@ -221,6 +221,23 @@ func ContainerAction(c *gin.Context) {
 		logger.OK("容器流量已重置: %s", name)
 		response.Success(c, "流量已重置")
 
+	case "refresh-ip":
+		var ips map[string]string
+		if err := executor.CreateSyncTask(name, "refresh_ip", func(ctx context.Context) error {
+			var refreshErr error
+			ips, refreshErr = svc.RefreshIP(ctx, name)
+			return refreshErr
+		}); err != nil {
+			response.Error(c, 500, err.Error())
+			return
+		}
+		logger.OK("容器IP已刷新: %s", name)
+		response.Success(c, gin.H{
+			"container": name,
+			"ipv4":      ips["ipv4"],
+			"ipv6":      ips["ipv6"],
+		})
+
 	default:
 		response.Error(c, 400, "不支持的操作类型: "+action)
 	}

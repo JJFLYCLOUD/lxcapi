@@ -45,7 +45,7 @@ func (s *IPv4Service) AllocateIPv4(ctx context.Context, containerName string, co
 		for _, ip := range ips {
 			db.DB.Unscoped().Where("ip_address = ?", ip).Delete(&models.IPv4Binding{})
 		}
-		return nil, fmt.Errorf("容器未配置内网IP")
+		return nil, fmt.Errorf("容器IPv4为空，请执行刷新IP后重试")
 	}
 	
 	for _, ip := range ips {

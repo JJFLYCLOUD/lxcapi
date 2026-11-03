@@ -186,7 +186,7 @@
 
 `POST` `/api/admin/containers/:name/action`
 
-对容器执行操作: start/stop/restart/pause/resume/reinstall/reset-password/reset-traffic
+对容器执行操作: start/stop/restart/pause/resume/reinstall/reset-password/reset-traffic/refresh-ip
 
 - **认证**: SessionAuth
 
@@ -1057,7 +1057,7 @@
 
 `POST` `/api/container/action`
 
-对容器执行操作: start/stop/restart/reinstall/reset-password
+对容器执行操作: start/stop/restart/reinstall/reset-password/refresh-ip
 
 - **认证**: ContainerAuth
 
@@ -1065,8 +1065,8 @@
 
 | 参数名 | 位置 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- | --- |
-| action | query | string | 是 | 操作类型: start/stop/restart/reinstall/reset-password |
-| request | body | object | 否 | 操作参数（reinstall需要image/password，reset-password需要password） |
+| action | query | string | 是 | 操作类型: start/stop/restart/reinstall/reset-password/refresh-ip |
+| request | body | object | 否 | 操作参数（reinstall需要image/password，reset-password需要password；refresh-ip无需参数） |
 
 **响应**
 
@@ -1405,7 +1405,7 @@
 
 `POST` `/api/system/containers/{name}/action`
 
-对容器执行操作: start/stop/restart/pause/resume/reinstall/reset-password
+对容器执行操作: start/stop/restart/pause/resume/reinstall/reset-password/refresh-ip
 
 - **认证**: ApiKeyAuth
 
@@ -1414,8 +1414,8 @@
 | 参数名 | 位置 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- | --- |
 | name | path | string | 是 | 容器名称 |
-| action | query | string | 是 | 操作类型: start/stop/restart/pause/resume/reinstall/reset-password |
-| request | body | object | 否 | 操作参数（reinstall需要image/password，reset-password需要password） |
+| action | query | string | 是 | 操作类型: start/stop/restart/pause/resume/reinstall/reset-password/refresh-ip |
+| request | body | object | 否 | 操作参数（reinstall需要image/password，reset-password需要password；refresh-ip无需参数） |
 
 **响应**
 

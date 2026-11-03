@@ -104,6 +104,7 @@
                 <button onclick="openConsole()" class="px-2 py-1 lg:py-1.5 text-xs font-medium text-cyan-700 bg-cyan-50 hover:bg-cyan-100 border border-cyan-200 rounded transition whitespace-nowrap">VNC控制台</button>
                 <button onclick="showResetPasswordModal()" class="px-2 py-1 lg:py-1.5 text-xs font-medium text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded transition whitespace-nowrap">重置密码</button>
                 <button onclick="showReinstallModal()" class="px-2 py-1 lg:py-1.5 text-xs font-medium text-orange-700 bg-orange-50 hover:bg-orange-100 border border-orange-200 rounded transition whitespace-nowrap">重装系统</button>
+                <button onclick="refreshIP()" class="px-2 py-1 lg:py-1.5 text-xs font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded transition whitespace-nowrap">刷新IP</button>
             </div>
         </div>
 
@@ -742,6 +743,36 @@
         function restartContainer() {
             if (!confirm('确定要重启容器吗？')) return;
             performAction('/api/container/action?action=restart', '重启');
+        }
+
+        function refreshIP() {
+            if (!containerData || containerData.status !== 'Running') {
+                showToast('error', '请启动容器');
+                return;
+            }
+            if (!confirm('确定要刷新容器IP吗？\n\n将重新读取容器当前IP，并重绑独立IP、重建端口映射规则。')) {
+                return;
+            }
+
+            showToast('info', '刷新IP中...');
+            $.ajax({
+                url: '/api/container/action?action=refresh-ip',
+                type: 'POST',
+                headers: headers,
+                success: function(result) {
+                    if (result.code === 200) {
+                        const data = result.data || {};
+                        showToast('success', `IP已刷新：IPv4 ${data.ipv4 || '无'}，IPv6 ${data.ipv6 || '无'}`);
+                        setTimeout(loadContainerInfo, 1000);
+                    } else {
+                        showToast('error', result.msg || '刷新IP失败');
+                    }
+                },
+                error: function(xhr) {
+                    handleAuthError(xhr);
+                    showToast('error', (xhr.responseJSON && xhr.responseJSON.msg) || '刷新IP失败');
+                }
+            });
         }
 
         function performAction(url, actionName) {
