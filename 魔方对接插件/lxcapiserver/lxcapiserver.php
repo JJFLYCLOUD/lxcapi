@@ -118,13 +118,6 @@ function lxcapiserver_ConfigOptions()
             'default'     => '0',
             'key'         => 'ipv4_mapping_limit',
         ],
-        'ipv6_pool_limit' => [
-            'type'        => 'text',
-            'name'        => 'IPv6地址池限制',
-            'description' => 'IPv6独立地址数量上限',
-            'default'     => '0',
-            'key'         => 'ipv6_pool_limit',
-        ],
         'ipv6_mapping_limit' => [
             'type'        => 'text',
             'name'        => 'IPv6端口映射限制',
@@ -353,7 +346,6 @@ function lxcapiserver_CreateAccount($params)
         'processes_limit' => (int)($configoptions['processes_limit'] ?? 512),
         'ipv4_pool_limit' => (int)($configoptions['ipv4_pool_limit'] ?? 0),
         'ipv4_mapping_limit' => (int)($configoptions['ipv4_mapping_limit'] ?? 0),
-        'ipv6_pool_limit' => (int)($configoptions['ipv6_pool_limit'] ?? 0),
         'ipv6_mapping_limit' => (int)($configoptions['ipv6_mapping_limit'] ?? 0),
         'reverse_proxy_limit' => (int)($configoptions['reverse_proxy_limit'] ?? 0),
     ];
@@ -968,7 +960,6 @@ function lxcapiserver_ChangePackage($params)
         'processes_limit'    => (int)($configoptions['processes_limit'] ?? 0) ?: null,
         'ipv4_pool_limit'    => (int)($configoptions['ipv4_pool_limit'] ?? 0) ?: null,
         'ipv4_mapping_limit' => (int)($configoptions['ipv4_mapping_limit'] ?? 0) ?: null,
-        'ipv6_pool_limit'    => (int)($configoptions['ipv6_pool_limit'] ?? 0) ?: null,
         'ipv6_mapping_limit' => (int)($configoptions['ipv6_mapping_limit'] ?? 0) ?: null,
         'reverse_proxy_limit'=> (int)($configoptions['reverse_proxy_limit'] ?? 0) ?: null,
     ];

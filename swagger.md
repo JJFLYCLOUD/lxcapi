@@ -1841,9 +1841,6 @@
     "ipv6_mapping_limit": {
       "type": "integer"
     },
-    "ipv6_pool_limit": {
-      "type": "integer"
-    },
     "memory": {
       "type": "integer"
     },
@@ -1926,9 +1923,6 @@
       "type": "integer"
     },
     "ipv6_mapping_limit": {
-      "type": "integer"
-    },
-    "ipv6_pool_limit": {
       "type": "integer"
     },
     "memory": {
