@@ -16,59 +16,11 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
 type ContainerService struct {
 	lxcClient *lxc.Client
-}
-
-// 后台 IP 获取任务的取消登记。容器删除时必须取消，避免旧 goroutine 在容器被
-// 删除后用同名容器继续写 IP/端口映射。
-type ipRetryTask struct {
-	seq    uint64
-	cancel context.CancelFunc
-}
-
-var (
-	ipRetryMu      sync.Mutex
-	ipRetrySeq     uint64
-	ipRetryCancels = make(map[string]ipRetryTask)
-)
-
-func startIPRetry(containerName string) (context.Context, func()) {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	ipRetryMu.Lock()
-	if old, ok := ipRetryCancels[containerName]; ok && old.cancel != nil {
-		old.cancel()
-	}
-	ipRetrySeq++
-	seq := ipRetrySeq
-	ipRetryCancels[containerName] = ipRetryTask{seq: seq, cancel: cancel}
-	ipRetryMu.Unlock()
-
-	return ctx, func() {
-		ipRetryMu.Lock()
-		if current, ok := ipRetryCancels[containerName]; ok && current.seq == seq {
-			delete(ipRetryCancels, containerName)
-		}
-		ipRetryMu.Unlock()
-	}
-}
-
-func cancelIPRetry(containerName string) {
-	ipRetryMu.Lock()
-	task, ok := ipRetryCancels[containerName]
-	if ok {
-		delete(ipRetryCancels, containerName)
-	}
-	ipRetryMu.Unlock()
-
-	if ok && task.cancel != nil {
-		task.cancel()
-	}
 }
 
 func NewContainerService() *ContainerService {
@@ -195,12 +147,26 @@ func (s *ContainerService) Create(ctx context.Context, req *models.CreateContain
 	var privateIP string
 	var privateIPv6 string
 	for i := 0; i < 10; i++ {
-		privateIP = s.getContainerIP(ctx, req.Name)
-		if privateIP != "" {
-			privateIPv6 = s.getContainerIPv6(ctx, req.Name)
+		if privateIP == "" || privateIPv6 == "" {
+			ipv4, ipv6, err := s.lxcClient.GetContainerAddresses(ctx, req.Name)
+			if err != nil {
+				logger.Warn("获取容器 %s 的IP失败: %v", req.Name, err)
+			} else {
+				if privateIP == "" {
+					privateIP = ipv4
+				}
+				if privateIPv6 == "" {
+					privateIPv6 = ipv6
+				}
+			}
+		}
+
+		if privateIP != "" && privateIPv6 != "" {
 			break
 		}
-		time.Sleep(1 * time.Second)
+		if i < 9 {
+			time.Sleep(2 * time.Second)
+		}
 	}
 	
 	if privateIP != "" {
@@ -209,13 +175,13 @@ func (s *ContainerService) Create(ctx context.Context, req *models.CreateContain
 			logger.Warn("固定容器IPv4地址失败: %v", err)
 		}
 	} else {
-		logger.Warn("首次未获取到容器内网IPv4，将在后台任务中重试")
+		logger.Warn("重试10次后仍未获取到容器内网IPv4")
 	}
 	
 	if privateIPv6 != "" {
 		logger.Info("容器内网IPv6: %s", privateIPv6)
 	} else {
-		logger.Warn("首次未获取到容器内网IPv6，将在后台任务中重试")
+		logger.Warn("重试10次后仍未获取到容器内网IPv6")
 	}
 	
 	containerHash, err := generateContainerHash()
@@ -273,17 +239,6 @@ func (s *ContainerService) Create(ctx context.Context, req *models.CreateContain
 		logger.Error("保存容器记录失败: %v", err)
 		s.lxcClient.DeleteContainer(ctx, req.Name)
 		return fmt.Errorf("保存容器记录失败: %v", err)
-	}
-	
-	needRetryIPv4 := privateIP == ""
-	needRetryIPv6 := privateIPv6 == ""
-	if needRetryIPv4 || needRetryIPv6 {
-		logger.Info("启动后台任务获取容器IP (IPv4: %v, IPv6: %v)", needRetryIPv4, needRetryIPv6)
-		retryCtx, done := startIPRetry(req.Name)
-		go func() {
-			defer done()
-			s.retryGetContainerIPs(retryCtx, req.Name, needRetryIPv4, needRetryIPv6, "", "")
-		}()
 	}
 	
 	if _, err := CreateContainerCredential(req.Name); err != nil {
@@ -421,9 +376,6 @@ func (s *ContainerService) Reinstall(ctx context.Context, name, image, password 
 		return fmt.Errorf("容器不存在: %v", err)
 	}
 
-	// 重装会重建容器，先取消旧的 IP 获取任务，避免旧结果覆盖新容器。
-	cancelIPRetry(name)
-
 	logger.Info("开始重装容器: %s", name)
 
 	if image == "" {
@@ -510,8 +462,11 @@ func (s *ContainerService) RefreshIP(ctx context.Context, name string) (map[stri
 		return nil, fmt.Errorf("请启动容器")
 	}
 
-	actualIPv4 := s.getContainerIP(ctx, name)
-	actualIPv6 := s.getContainerIPv6(ctx, name)
+	actualIPv4, actualIPv6, err := s.lxcClient.GetContainerAddresses(ctx, name)
+	if err != nil {
+		logger.Warn("刷新容器 %s IP失败: %v", name, err)
+		return nil, fmt.Errorf("未获取到容器IP，请联系管理员")
+	}
 	if actualIPv4 == "" && actualIPv6 == "" {
 		return nil, fmt.Errorf("未获取到容器IP，请联系管理员")
 	}
@@ -544,9 +499,6 @@ func (s *ContainerService) RefreshIP(ctx context.Context, name string) (map[stri
 }
 
 func (s *ContainerService) Delete(ctx context.Context, name string) error {
-	// 取消该容器的后台 IP 获取任务，避免容器删除后旧 goroutine 继续轮询/写库。
-	cancelIPRetry(name)
-
 	var container models.Container
 	if err := db.DB.Where("name = ?", name).First(&container).Error; err == nil && container.PrivateIPv6 != "" {
 		ipv6.CleanupProxyNDPForAddress(container.PrivateIPv6)
@@ -728,93 +680,6 @@ func (s *ContainerService) GetInfo(ctx context.Context, name string) (map[string
 	}
 
 	return result, nil
-}
-
-func (s *ContainerService) getContainerIP(ctx context.Context, name string) string {
-	ip, err := s.lxcClient.GetContainerIP(ctx, name)
-	if err != nil {
-		logger.Warn("获取容器 %s 内网IPv4失败: %v", name, err)
-		return ""
-	}
-	return ip
-}
-
-func (s *ContainerService) getContainerIPv6(ctx context.Context, name string) string {
-	ip, err := s.lxcClient.GetContainerIPv6(ctx, name)
-	if err != nil {
-		logger.Warn("获取容器 %s 内网IPv6失败: %v", name, err)
-		return ""
-	}
-	return ip
-}
-
-func (s *ContainerService) retryGetContainerIPs(ctx context.Context, containerName string, needIPv4, needIPv6 bool, oldIPv4, oldIPv6 string) {
-	maxRetries := 10
-	retryInterval := 2
-	
-	logger.Info("启动后台任务获取容器 %s 的IP地址 (IPv4: %v, IPv6: %v)", containerName, needIPv4, needIPv6)
-	
-	for i := 0; i < maxRetries; i++ {
-		select {
-		case <-ctx.Done():
-			logger.Info("后台IP获取任务已取消: %s", containerName)
-			return
-		case <-time.After(time.Duration(retryInterval) * time.Second):
-		}
-
-		if err := ctx.Err(); err != nil {
-			logger.Info("后台IP获取任务已取消: %s", containerName)
-			return
-		}
-		
-		updateFields := make(map[string]interface{})
-		updated := false
-		
-		if needIPv4 {
-			if ipv4 := s.getContainerIP(ctx, containerName); ipv4 != "" {
-				updateFields["private_ip"] = ipv4
-				logger.OK("后台任务成功获取容器 %s 内网IPv4: %s", containerName, ipv4)
-				if err := s.lxcClient.SetContainerIPv4Address(ctx, containerName, ipv4); err != nil {
-					logger.Warn("固定容器IPv4地址失败: %v", err)
-				}
-				if oldIPv4 != "" && ipv4 != oldIPv4 {
-					s.updateContainerIPv4Rules(containerName, oldIPv4, ipv4)
-				}
-				needIPv4 = false
-				updated = true
-			}
-		}
-		
-		if needIPv6 {
-			if ipv6 := s.getContainerIPv6(ctx, containerName); ipv6 != "" {
-				updateFields["private_ipv6"] = ipv6
-				logger.OK("后台任务成功获取容器 %s 内网IPv6: %s", containerName, ipv6)
-				if oldIPv6 != "" && ipv6 != oldIPv6 {
-					s.updateContainerIPv6Rules(containerName, oldIPv6, ipv6)
-				}
-				needIPv6 = false
-				updated = true
-			}
-		}
-		
-		if updated {
-			if err := db.DB.Model(&models.Container{}).Where("name = ?", containerName).Updates(updateFields).Error; err != nil {
-				logger.Warn("后台任务更新容器IP失败 %s: %v", containerName, err)
-			}
-		}
-		
-		if !needIPv4 && !needIPv6 {
-			logger.OK("后台任务完成：容器 %s 的所有IP地址已获取", containerName)
-			return
-		}
-	}
-	
-	if needIPv4 {
-		logger.Warn("后台任务超时：容器 %s 的IPv4地址获取失败（已重试%d次）", containerName, maxRetries)
-	}
-	if needIPv6 {
-		logger.Warn("后台任务超时：容器 %s 的IPv6地址获取失败（已重试%d次）", containerName, maxRetries)
-	}
 }
 
 func (s *ContainerService) updateContainerIPv4Rules(containerName, oldIP, newIP string) {

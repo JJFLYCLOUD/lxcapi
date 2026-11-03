@@ -240,39 +240,77 @@ func (c *Client) SetRootPassword(ctx context.Context, name, password string) err
 	return nil
 }
 
-func (c *Client) GetContainerIP(ctx context.Context, name string) (string, error) {
-	info, err := c.GetContainerInfo(ctx, name)
-	if err != nil {
-		return "", err
+// GetContainerAddresses 只请求一次容器 state：
+// IPv4 只从 eth0 获取；IPv6 优先 eth0，没有再从 eth1 获取。
+func (c *Client) GetContainerAddresses(ctx context.Context, name string) (string, string, error) {
+	var state ContainerState
+	if err := c.get(ctx, fmt.Sprintf("/1.0/instances/%s/state", name), &state); err != nil {
+		return "", "", fmt.Errorf("获取容器网络状态失败: %v", err)
 	}
 
-	if info.State == nil || info.State.Network == nil {
-		return "", fmt.Errorf("容器网络信息不可用")
+	if state.Network == nil {
+		return "", "", fmt.Errorf("容器网络信息不可用")
 	}
 
-	eth0Data, exists := info.State.Network["eth0"]
-	if !exists {
-		return "", fmt.Errorf("未找到 eth0 网卡")
+	ipv4, ipv6 := parseInterfaceAddresses(state.Network["eth0"])
+	if ipv6 == "" {
+		_, eth1IPv6 := parseInterfaceAddresses(state.Network["eth1"])
+		ipv6 = eth1IPv6
 	}
 
-	if iface, ok := eth0Data.(map[string]interface{}); ok {
-		if addresses, ok := iface["addresses"].([]interface{}); ok {
-			for _, addr := range addresses {
-				if addrMap, ok := addr.(map[string]interface{}); ok {
-					if family, ok := addrMap["family"].(string); ok && family == "inet" {
-						if address, ok := addrMap["address"].(string); ok {
-							if !isInvalidIPv4(address) {
-								logger.Info("从容器 %s eth0 网卡获取到IPv4: %s", name, address)
-								return address, nil
-							}
-						}
-					}
-				}
+	if ipv4 == "" && ipv6 == "" {
+		return "", "", fmt.Errorf("eth0/eth1 未找到有效的IP地址")
+	}
+
+	if ipv4 != "" {
+		logger.Info("从容器 %s eth0 网卡获取到IPv4: %s", name, ipv4)
+	}
+	if ipv6 != "" {
+		logger.Info("从容器 %s 获取到IPv6: %s", name, ipv6)
+		c.sendIPv6NeighborRequest(name, ipv6)
+	}
+
+	return ipv4, ipv6, nil
+}
+
+// parseInterfaceAddresses 解析单个网卡的 addresses，返回该网卡的 IPv4 / IPv6。
+func parseInterfaceAddresses(data interface{}) (string, string) {
+	iface, ok := data.(map[string]interface{})
+	if !ok {
+		return "", ""
+	}
+
+	addresses, ok := iface["addresses"].([]interface{})
+	if !ok {
+		return "", ""
+	}
+
+	var ipv4, ipv6 string
+	for _, addr := range addresses {
+		addrMap, ok := addr.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		family, _ := addrMap["family"].(string)
+		address, _ := addrMap["address"].(string)
+		if address == "" {
+			continue
+		}
+
+		switch family {
+		case "inet":
+			if ipv4 == "" && !isInvalidIPv4(address) {
+				ipv4 = address
+			}
+		case "inet6":
+			if ipv6 == "" && !strings.HasPrefix(address, "fe80:") {
+				ipv6 = address
 			}
 		}
 	}
 
-	return "", fmt.Errorf("eth0 网卡未找到有效的IPv4地址")
+	return ipv4, ipv6
 }
 
 func isInvalidIPv4(ip string) bool {
@@ -401,42 +439,6 @@ func (c *Client) SetContainerBandwidth(ctx context.Context, name string, ingress
 
 	logger.OK("容器带宽更新成功: %s", name)
 	return nil
-}
-
-func (c *Client) GetContainerIPv6(ctx context.Context, name string) (string, error) {
-	info, err := c.GetContainerInfo(ctx, name)
-	if err != nil {
-		return "", err
-	}
-
-	if info.State == nil || info.State.Network == nil {
-		return "", fmt.Errorf("容器网络信息不可用")
-	}
-
-	eth0Data, exists := info.State.Network["eth0"]
-	if !exists {
-		return "", fmt.Errorf("未找到 eth0 网卡")
-	}
-
-	if iface, ok := eth0Data.(map[string]interface{}); ok {
-		if addresses, ok := iface["addresses"].([]interface{}); ok {
-			for _, addr := range addresses {
-				if addrMap, ok := addr.(map[string]interface{}); ok {
-					if family, ok := addrMap["family"].(string); ok && family == "inet6" {
-						if address, ok := addrMap["address"].(string); ok {
-							if !strings.HasPrefix(address, "fe80:") {
-								logger.Info("从容器 %s eth0 网卡获取到IPv6: %s", name, address)
-								c.sendIPv6NeighborRequest(name, address)
-								return address, nil
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return "", fmt.Errorf("eth0 网卡未找到有效的IPv6地址")
 }
 
 func (c *Client) sendIPv6NeighborRequest(containerName, address string) {
