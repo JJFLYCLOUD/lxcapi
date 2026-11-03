@@ -540,6 +540,36 @@
         <form method="dialog" class="modal-backdrop"><button>关闭</button></form>
     </dialog>
 
+    <dialog id="refreshIPModal" class="modal">
+        <div class="modal-box max-w-lg">
+            <h3 class="font-bold text-lg mb-4 flex items-center gap-2">
+                <svg class="w-5 h-5 text-sky-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                </svg>
+                刷新IP
+            </h3>
+            <div class="space-y-4">
+                <div class="flex items-start gap-3 p-3 bg-sky-50 border border-sky-200 rounded-lg">
+                    <svg class="w-5 h-5 text-sky-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    <span class="text-sm font-medium text-sky-800">将重新读取容器当前 IP，并重绑独立 IP、重建端口映射规则。</span>
+                </div>
+                <p class="text-sm text-gray-600">容器必须处于运行状态。刷新成功后页面会自动更新 IP 信息。</p>
+            </div>
+            <div class="modal-action pt-2">
+                <button type="button" onclick="closeRefreshIPModal()" class="px-3 py-1.5 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 border border-gray-300 rounded transition">取消</button>
+                <button type="button" onclick="confirmRefreshIP()" class="px-3 py-1.5 text-sm font-medium text-gray-700 content-box hover:bg-gray-50 border border-gray-200 rounded-lg transition flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                    </svg>
+                    <span>确认刷新</span>
+                </button>
+            </div>
+        </div>
+        <form method="dialog" class="modal-backdrop"><button>关闭</button></form>
+    </dialog>
+
     <dialog id="updateConfigModal" class="modal">
         <div class="modal-box max-w-4xl">
             <h3 class="font-bold text-lg mb-4 flex items-center gap-2">
@@ -1571,10 +1601,15 @@
                 showToast('error', '请启动容器');
                 return;
             }
-            if (!confirm('确定要刷新容器IP吗？\n\n将重新读取容器当前IP，并重绑独立IP、重建端口映射规则。')) {
-                return;
-            }
+            document.getElementById('refreshIPModal').showModal();
+        }
 
+        function closeRefreshIPModal() {
+            document.getElementById('refreshIPModal').close();
+        }
+
+        function confirmRefreshIP() {
+            closeRefreshIPModal();
             showToast('info', '刷新IP中...');
             $.ajax({
                 url: `/api/admin/containers/${encodeURIComponent(containerName)}/action?action=refresh-ip`,
