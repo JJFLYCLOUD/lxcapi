@@ -49,23 +49,47 @@ func GetAllContainersFromDB() []ContainerCacheJSON {
 }
 
 func RefreshContainerCache(ctx context.Context, name string) error {
-	lxcClient := lxc.DefaultClient()
-
-	var container models.Container
-	if err := db.DB.Where("name = ?", name).First(&container).Error; err != nil {
-		return fmt.Errorf("容器不存在于数据库: %s", name)
+	ok, err := canRefreshContainerCache(name)
+	if err != nil || !ok {
+		return err
 	}
 
-	if container.Status == "frozen" || container.Status == "limited" {
-		logger.Info("容器 %s 处于暂停/限速状态，跳过缓存刷新", name)
-		return nil
-	}
-
-	info, err := lxcClient.GetContainerInfo(ctx, name)
+	info, err := lxc.DefaultClient().GetContainerInfo(ctx, name)
 	if err != nil {
 		return err
 	}
 
+	return applyContainerInfo(name, info)
+}
+
+// RefreshContainerCacheWithInfo 复用已获取的容器信息，避免重复请求 Incus。
+func RefreshContainerCacheWithInfo(ctx context.Context, name string, info *lxc.ContainerInfo) error {
+	ok, err := canRefreshContainerCache(name)
+	if err != nil || !ok {
+		return err
+	}
+	if info == nil {
+		return fmt.Errorf("容器信息为空: %s", name)
+	}
+
+	return applyContainerInfo(name, info)
+}
+
+func canRefreshContainerCache(name string) (bool, error) {
+	var container models.Container
+	if err := db.DB.Where("name = ?", name).First(&container).Error; err != nil {
+		return false, fmt.Errorf("容器不存在于数据库: %s", name)
+	}
+
+	if container.Status == "frozen" || container.Status == "limited" {
+		logger.Info("容器 %s 处于暂停/限速状态，跳过缓存刷新", name)
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func applyContainerInfo(name string, info *lxc.ContainerInfo) error {
 	// 只更新来自 Incus 的运行时状态，避免整行 Save 覆盖监控线程并发写入的
 	// traffic_usage/rx_bytes/tx_bytes/traffic_over/last_reset，以及凭证、密码等字段。
 	// 注意：Incus 未返回的配置项不写入，保持数据库原值。

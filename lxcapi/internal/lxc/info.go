@@ -29,17 +29,34 @@ type ContainerState struct {
 	CPU        map[string]interface{} `json:"cpu"`
 }
 
-func (c *Client) GetContainerInfo(ctx context.Context, name string) (*ContainerInfo, error) {
+// GetContainerConfig 只请求实例配置（1 次）。
+func (c *Client) GetContainerConfig(ctx context.Context, name string) (*ContainerInfo, error) {
 	var info ContainerInfo
-	err := c.get(ctx, fmt.Sprintf("/1.0/instances/%s?recursion=2", name), &info)
-	if err != nil {
-		return nil, fmt.Errorf("获取容器信息失败: %v", err)
+	if err := c.get(ctx, fmt.Sprintf("/1.0/instances/%s", name), &info); err != nil {
+		return nil, fmt.Errorf("获取容器配置失败: %v", err)
 	}
-
-	var state ContainerState
-	if err := c.get(ctx, fmt.Sprintf("/1.0/instances/%s/state", name), &state); err == nil {
-		info.State = &state
-	}
-
 	return &info, nil
+}
+
+// GetContainerState 只请求实例运行状态（1 次）。
+func (c *Client) GetContainerState(ctx context.Context, name string) (*ContainerState, error) {
+	var state ContainerState
+	if err := c.get(ctx, fmt.Sprintf("/1.0/instances/%s/state", name), &state); err != nil {
+		return nil, fmt.Errorf("获取容器状态失败: %v", err)
+	}
+	return &state, nil
+}
+
+// GetContainerInfo 请求实例配置 + 运行状态（2 次）。
+func (c *Client) GetContainerInfo(ctx context.Context, name string) (*ContainerInfo, error) {
+	info, err := c.GetContainerConfig(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+
+	if state, err := c.GetContainerState(ctx, name); err == nil {
+		info.State = state
+	}
+
+	return info, nil
 }

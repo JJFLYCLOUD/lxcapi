@@ -66,10 +66,6 @@ func (s *ContainerService) Create(ctx context.Context, req *models.CreateContain
 		return err
 	}
 
-	if s.lxcClient.ContainerExists(ctx, req.Name) {
-		return fmt.Errorf("容器已存在: %s", req.Name)
-	}
-	
 	logger.Info("开始创建容器: %s, 镜像: %s", req.Name, req.Image)
 	
 	memory := ""
@@ -116,12 +112,16 @@ func (s *ContainerService) Create(ctx context.Context, req *models.CreateContain
 		return fmt.Errorf("启动容器失败: %v", err)
 	}
 	
+	info, infoErr := s.lxcClient.GetContainerInfo(ctx, req.Name)
+	if infoErr != nil {
+		logger.Warn("获取容器信息失败: %v", infoErr)
+		info = &lxc.ContainerInfo{Config: map[string]interface{}{}, State: &lxc.ContainerState{}}
+	}
+
 	imageAlias := req.Image
-	if info, err := s.lxcClient.GetContainerInfo(ctx, req.Name); err == nil {
-		if imageDesc, ok := info.Config["image.description"].(string); ok && imageDesc != "" {
-			imageAlias = imageDesc
-			logger.Info("从LXD获取镜像别名: %s", imageAlias)
-		}
+	if imageDesc, ok := info.Config["image.description"].(string); ok && imageDesc != "" {
+		imageAlias = imageDesc
+		logger.Info("从LXD获取镜像别名: %s", imageAlias)
 	}
 	
 	actualPassword := req.Password
@@ -136,43 +136,44 @@ func (s *ContainerService) Create(ctx context.Context, req *models.CreateContain
 		logger.Info("root密码已设置")
 	}
 	
-	macAddress, err := s.lxcClient.GetContainerMAC(ctx, req.Name)
-	if err != nil {
-		logger.Warn("获取容器MAC地址失败: %v", err)
-		macAddress = ""
-	} else {
+	macAddress := lxc.MACFromState(info.State)
+	if macAddress != "" {
 		logger.Info("容器MAC地址: %s", macAddress)
+	} else {
+		logger.Warn("获取容器MAC地址失败")
 	}
 	
-	var privateIP string
-	var privateIPv6 string
-	for i := 0; i < 10; i++ {
-		if privateIP == "" || privateIPv6 == "" {
-			ipv4, ipv6, err := s.lxcClient.GetContainerAddresses(ctx, req.Name)
-			if err != nil {
-				logger.Warn("获取容器 %s 的IP失败: %v", req.Name, err)
-			} else {
-				if privateIP == "" {
-					privateIP = ipv4
-				}
-				if privateIPv6 == "" {
-					privateIPv6 = ipv6
-				}
-			}
-		}
+	privateIP, privateIPv6 := lxc.AddressesFromState(info.State)
+	retryAttempts := 9
+	if infoErr != nil || info.State == nil {
+		retryAttempts = 10
+	}
+	for i := 0; i < retryAttempts && (privateIP == "" || privateIPv6 == ""); i++ {
+		time.Sleep(2 * time.Second)
 
-		if privateIP != "" && privateIPv6 != "" {
-			break
+		ipv4, ipv6, err := s.lxcClient.GetContainerAddresses(ctx, req.Name)
+		if err != nil {
+			logger.Warn("获取容器 %s 的IP失败: %v", req.Name, err)
+			continue
 		}
-		if i < 9 {
-			time.Sleep(2 * time.Second)
+		if privateIP == "" {
+			privateIP = ipv4
+		}
+		if privateIPv6 == "" {
+			privateIPv6 = ipv6
 		}
 	}
 	
 	if privateIP != "" {
 		logger.Info("容器内网IPv4: %s", privateIP)
-		if err := s.lxcClient.SetContainerIPv4Address(ctx, req.Name, privateIP); err != nil {
-			logger.Warn("固定容器IPv4地址失败: %v", err)
+		var pinErr error
+		if infoErr == nil {
+			pinErr = s.lxcClient.SetContainerIPv4AddressFromInfo(ctx, req.Name, privateIP, info)
+		} else {
+			pinErr = s.lxcClient.SetContainerIPv4Address(ctx, req.Name, privateIP)
+		}
+		if pinErr != nil {
+			logger.Warn("固定容器IPv4地址失败: %v", pinErr)
 		}
 	} else {
 		logger.Warn("重试10次后仍未获取到容器内网IPv4")
@@ -286,7 +287,11 @@ func (s *ContainerService) Create(ctx context.Context, req *models.CreateContain
 		})
 	}
 	
-	cache.RefreshContainerCache(ctx, req.Name)
+	if infoErr == nil {
+		cache.RefreshContainerCacheWithInfo(ctx, req.Name, info)
+	} else {
+		cache.RefreshContainerCache(ctx, req.Name)
+	}
 	
 	return nil
 }
@@ -345,13 +350,17 @@ func (s *ContainerService) UnlimitSpeed(ctx context.Context, name string) error 
 		return fmt.Errorf("容器不存在: %v", err)
 	}
 
-	if err := s.lxcClient.SetContainerBandwidth(ctx, name, container.Ingress, container.Egress); err != nil {
+	info, err := s.lxcClient.GetContainerConfig(ctx, name)
+	if err != nil {
+		return fmt.Errorf("获取容器配置失败: %v", err)
+	}
+
+	if err := s.lxcClient.SetContainerBandwidthFromInfo(ctx, name, container.Ingress, container.Egress, info); err != nil {
 		return fmt.Errorf("恢复容器带宽失败: %v", err)
 	}
 
 	status := "stopped"
-	actual, err := s.lxcClient.GetContainerStatus(ctx, name)
-	if err == nil && actual == "Running" {
+	if info.Status == "Running" {
 		status = "running"
 	}
 
@@ -362,7 +371,7 @@ func (s *ContainerService) UnlimitSpeed(ctx context.Context, name string) error 
 		return fmt.Errorf("更新容器状态失败: %v", err)
 	}
 
-	if err := cache.RefreshContainerCache(ctx, name); err != nil {
+	if err := cache.RefreshContainerCacheWithInfo(ctx, name, info); err != nil {
 		logger.Warn("刷新容器缓存失败 %s: %v", name, err)
 	}
 
@@ -382,12 +391,7 @@ func (s *ContainerService) Reinstall(ctx context.Context, name, image, password 
 		image = container.Image
 	}
 
-	// 1. 检查 Incus 中容器是否存在
-	if !s.lxcClient.ContainerExists(ctx, name) {
-		return fmt.Errorf("容器 %s 在 Incus 中不存在，无法重装", name)
-	}
-
-	// 2. 停止容器
+	// 1. 停止容器
 	if err := s.lxcClient.StopContainer(ctx, name); err != nil {
 		logger.Warn("停止容器失败（可能已停止）: %v", err)
 	}
@@ -404,7 +408,7 @@ func (s *ContainerService) Reinstall(ctx context.Context, name, image, password 
 
 	// 5. 获取镜像别名
 	imageAlias := image
-	if info, err := s.lxcClient.GetContainerInfo(ctx, name); err == nil {
+	if info, err := s.lxcClient.GetContainerConfig(ctx, name); err == nil {
 		if imageDesc, ok := info.Config["image.description"].(string); ok && imageDesc != "" {
 			imageAlias = imageDesc
 			logger.Info("从LXD获取镜像别名: %s", imageAlias)
@@ -450,23 +454,16 @@ func (s *ContainerService) RefreshIP(ctx context.Context, name string) (map[stri
 		return nil, fmt.Errorf("容器不存在: %s", name)
 	}
 
-	if !s.lxcClient.ContainerExists(ctx, name) {
-		return nil, fmt.Errorf("容器在 Incus 中不存在: %s", name)
-	}
-
-	status, err := s.lxcClient.GetContainerStatus(ctx, name)
+	info, err := s.lxcClient.GetContainerInfo(ctx, name)
 	if err != nil {
-		return nil, fmt.Errorf("获取容器状态失败: %v", err)
+		logger.Warn("刷新容器 %s 信息失败: %v", name, err)
+		return nil, fmt.Errorf("获取容器信息失败: %v", err)
 	}
-	if status != "Running" {
+	if info.Status != "Running" {
 		return nil, fmt.Errorf("请启动容器")
 	}
 
-	actualIPv4, actualIPv6, err := s.lxcClient.GetContainerAddresses(ctx, name)
-	if err != nil {
-		logger.Warn("刷新容器 %s IP失败: %v", name, err)
-		return nil, fmt.Errorf("未获取到容器IP，请联系管理员")
-	}
+	actualIPv4, actualIPv6 := lxc.AddressesFromState(info.State)
 	if actualIPv4 == "" && actualIPv6 == "" {
 		return nil, fmt.Errorf("未获取到容器IP，请联系管理员")
 	}
@@ -474,7 +471,7 @@ func (s *ContainerService) RefreshIP(ctx context.Context, name string) (map[stri
 	updates := make(map[string]interface{})
 
 	if actualIPv4 != "" {
-		if err := s.lxcClient.SetContainerIPv4Address(ctx, name, actualIPv4); err != nil {
+		if err := s.lxcClient.SetContainerIPv4AddressFromInfo(ctx, name, actualIPv4, info); err != nil {
 			logger.Warn("固定容器IPv4地址失败: %v", err)
 		}
 		updates["private_ip"] = actualIPv4
@@ -490,7 +487,7 @@ func (s *ContainerService) RefreshIP(ctx context.Context, name string) (map[stri
 		return nil, fmt.Errorf("更新容器IP失败: %v", err)
 	}
 
-	if err := cache.RefreshContainerCache(ctx, name); err != nil {
+	if err := cache.RefreshContainerCacheWithInfo(ctx, name, info); err != nil {
 		logger.Warn("刷新容器缓存失败 %s: %v", name, err)
 	}
 
@@ -780,8 +777,9 @@ func (s *ContainerService) UpdateConfig(ctx context.Context, name string, req *m
 		return nil, fmt.Errorf("容器不存在: %s", name)
 	}
 
-	if !s.lxcClient.ContainerExists(ctx, name) {
-		return nil, fmt.Errorf("容器在LXD中不存在: %s", name)
+	info, err := s.lxcClient.GetContainerConfig(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("容器在LXD中不存在: %v", err)
 	}
 
 	var updated []string
@@ -847,28 +845,28 @@ func (s *ContainerService) UpdateConfig(ctx context.Context, name string, req *m
 		updated = append(updated, "processes_limit")
 	}
 
-	if cpu > 0 || memory != "" || disk != "" || cpuAllowance != "" || ioRead != "" || ioWrite != "" || processesLimit > 0 || req.Privileged != nil || req.MemorySwap != nil || req.AllowNesting != nil {
-		if err := s.lxcClient.UpdateContainerConfig(ctx, name, cpu, memory, disk, cpuAllowance, ioRead, ioWrite, processesLimit, req.Privileged, req.MemorySwap, req.AllowNesting); err != nil {
-			return nil, fmt.Errorf("更新LXD配置失败: %v", err)
-		}
+	resources := lxc.ContainerResources{
+		CPU:            cpu,
+		Memory:         memory,
+		Disk:           disk,
+		CPUAllowance:   cpuAllowance,
+		IORead:         ioRead,
+		IOWrite:        ioWrite,
+		ProcessesLimit: processesLimit,
+		Privileged:     req.Privileged,
+		MemorySwap:     req.MemorySwap,
+		AllowNesting:   req.AllowNesting,
 	}
-
-	// 带宽统一走 SetContainerBandwidth：0 表示删除该方向限速，
-	// 未指定的一侧沿用数据库中的原始值，避免残留超限限速。
-	ingressSet := req.Ingress != nil && *req.Ingress >= 0
-	egressSet := req.Egress != nil && *req.Egress >= 0
-	if ingressSet || egressSet {
-		ingressMbit := container.Ingress
-		egressMbit := container.Egress
-		if ingressSet {
-			ingressMbit = *req.Ingress
-		}
-		if egressSet {
-			egressMbit = *req.Egress
-		}
-		if err := s.lxcClient.SetContainerBandwidth(ctx, name, ingressMbit, egressMbit); err != nil {
-			return nil, fmt.Errorf("更新容器带宽失败: %v", err)
-		}
+	if req.Ingress != nil && *req.Ingress >= 0 {
+		v := *req.Ingress
+		resources.Ingress = &v
+	}
+	if req.Egress != nil && *req.Egress >= 0 {
+		v := *req.Egress
+		resources.Egress = &v
+	}
+	if err := s.lxcClient.UpdateContainerResources(ctx, name, resources, info); err != nil {
+		return nil, fmt.Errorf("更新LXD配置失败: %v", err)
 	}
 
 	if req.TrafficLimit != nil && *req.TrafficLimit >= 0 {

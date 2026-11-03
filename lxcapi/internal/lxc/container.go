@@ -8,31 +8,26 @@ import (
 	"lxcapi/internal/ipv6"
 	"lxcapi/pkg/logger"
 	"strings"
-	"time"
 )
 
-func (c *Client) GetContainerMAC(ctx context.Context, name string) (string, error) {
-	info, err := c.GetContainerInfo(ctx, name)
-	if err != nil {
-		return "", err
+// MACFromState 从运行状态中读取 eth0 的 MAC 地址。
+func MACFromState(state *ContainerState) string {
+	if state == nil || state.Network == nil {
+		return ""
 	}
 
-	if info.State == nil || info.State.Network == nil {
-		return "", fmt.Errorf("容器网络信息不可用")
-	}
-
-	eth0Data, exists := info.State.Network["eth0"]
+	eth0Data, exists := state.Network["eth0"]
 	if !exists {
-		return "", fmt.Errorf("未找到 eth0 网卡")
+		return ""
 	}
 
 	if iface, ok := eth0Data.(map[string]interface{}); ok {
 		if hwaddr, ok := iface["hwaddr"].(string); ok {
-			return hwaddr, nil
+			return hwaddr
 		}
 	}
 
-	return "", fmt.Errorf("未找到MAC地址")
+	return ""
 }
 
 func (c *Client) CreateContainerWithConfig(ctx context.Context, name, image, storagePool string, cpu int, memory, disk, ingress, egress string, allowNesting, memorySwap, privileged bool, macAddress, cpuAllowance, ioRead, ioWrite string, processesLimit int) error {
@@ -125,15 +120,17 @@ func (c *Client) StartContainer(ctx context.Context, name string) error {
 	if err := c.waitForOperation(ctx, opPath, 60); err != nil {
 		return fmt.Errorf("等待容器启动失败: %v", err)
 	}
-	for i := 0; i < 10; i++ {
-		status, err := c.GetContainerStatus(ctx, name)
-		if err == nil && status == "Running" {
-			logger.OK("容器启动成功: %s", name)
-			return nil
-		}
-		time.Sleep(1 * time.Second)
+
+	state, err := c.GetContainerState(ctx, name)
+	if err != nil {
+		return fmt.Errorf("获取容器状态失败: %v", err)
 	}
-	return fmt.Errorf("容器 %s 启动后未达到 Running 状态", name)
+	if state.Status != "Running" {
+		return fmt.Errorf("容器 %s 启动后未达到 Running 状态", name)
+	}
+
+	logger.OK("容器启动成功: %s", name)
+	return nil
 }
 
 func (c *Client) StopContainer(ctx context.Context, name string) error {
@@ -155,12 +152,26 @@ func (c *Client) StopContainer(ctx context.Context, name string) error {
 
 func (c *Client) RestartContainer(ctx context.Context, name string) error {
 	logger.Info("重启容器: %s", name)
-	if err := c.StopContainer(ctx, name); err != nil {
-		return fmt.Errorf("重启-停止失败: %v", err)
+	data, err := c.put(ctx, fmt.Sprintf("/1.0/instances/%s/state", name), map[string]interface{}{"action": "restart", "force": true})
+	if err != nil {
+		return fmt.Errorf("重启容器失败: %v", err)
 	}
-	if err := c.StartContainer(ctx, name); err != nil {
-		return fmt.Errorf("重启-启动失败: %v", err)
+	opPath, err := parseOperationID(data)
+	if err != nil {
+		return fmt.Errorf("解析重启操作失败: %v", err)
 	}
+	if err := c.waitForOperation(ctx, opPath, 60); err != nil {
+		return fmt.Errorf("等待容器重启失败: %v", err)
+	}
+
+	state, err := c.GetContainerState(ctx, name)
+	if err != nil {
+		return fmt.Errorf("获取容器状态失败: %v", err)
+	}
+	if state.Status != "Running" {
+		return fmt.Errorf("容器 %s 重启后未达到 Running 状态", name)
+	}
+
 	logger.OK("容器重启成功: %s", name)
 	return nil
 }
@@ -243,21 +254,12 @@ func (c *Client) SetRootPassword(ctx context.Context, name, password string) err
 // GetContainerAddresses 只请求一次容器 state：
 // IPv4 只从 eth0 获取；IPv6 优先 eth0，没有再从 eth1 获取。
 func (c *Client) GetContainerAddresses(ctx context.Context, name string) (string, string, error) {
-	var state ContainerState
-	if err := c.get(ctx, fmt.Sprintf("/1.0/instances/%s/state", name), &state); err != nil {
-		return "", "", fmt.Errorf("获取容器网络状态失败: %v", err)
+	state, err := c.GetContainerState(ctx, name)
+	if err != nil {
+		return "", "", err
 	}
 
-	if state.Network == nil {
-		return "", "", fmt.Errorf("容器网络信息不可用")
-	}
-
-	ipv4, ipv6 := parseInterfaceAddresses(state.Network["eth0"])
-	if ipv6 == "" {
-		_, eth1IPv6 := parseInterfaceAddresses(state.Network["eth1"])
-		ipv6 = eth1IPv6
-	}
-
+	ipv4, ipv6 := AddressesFromState(state)
 	if ipv4 == "" && ipv6 == "" {
 		return "", "", fmt.Errorf("eth0/eth1 未找到有效的IP地址")
 	}
@@ -271,6 +273,22 @@ func (c *Client) GetContainerAddresses(ctx context.Context, name string) (string
 	}
 
 	return ipv4, ipv6, nil
+}
+
+// AddressesFromState 从运行状态解析 IPv4 / IPv6。
+// IPv4 只取 eth0；IPv6 优先 eth0，没有再从 eth1 取。
+func AddressesFromState(state *ContainerState) (string, string) {
+	if state == nil || state.Network == nil {
+		return "", ""
+	}
+
+	ipv4, ipv6 := parseInterfaceAddresses(state.Network["eth0"])
+	if ipv6 == "" {
+		_, eth1IPv6 := parseInterfaceAddresses(state.Network["eth1"])
+		ipv6 = eth1IPv6
+	}
+
+	return ipv4, ipv6
 }
 
 // parseInterfaceAddresses 解析单个网卡的 addresses，返回该网卡的 IPv4 / IPv6。
@@ -323,76 +341,115 @@ func isInvalidIPv4(ip string) bool {
 	return false
 }
 
-func (c *Client) UpdateContainerConfig(ctx context.Context, name string, cpu int, memory, disk, cpuAllowance, ioRead, ioWrite string, processesLimit int, privileged, memorySwap, allowNesting *bool) error {
-	logger.Info("更新容器配置: %s", name)
+type ContainerResources struct {
+	CPU            int
+	Memory         string
+	Disk           string
+	CPUAllowance   string
+	IORead         string
+	IOWrite        string
+	ProcessesLimit int
+	Privileged     *bool
+	MemorySwap     *bool
+	AllowNesting   *bool
+	Ingress        *int
+	Egress         *int
+}
 
+// UpdateContainerResources 将配置、磁盘/IO、带宽合并为一次 PATCH。
+func (c *Client) UpdateContainerResources(ctx context.Context, name string, r ContainerResources, info *ContainerInfo) error {
 	patch := map[string]interface{}{}
 
 	config := map[string]interface{}{}
-	if cpu > 0 {
-		config["limits.cpu"] = fmt.Sprintf("%d", cpu)
+	if r.CPU > 0 {
+		config["limits.cpu"] = fmt.Sprintf("%d", r.CPU)
 	}
-	if memory != "" {
-		config["limits.memory"] = memory
+	if r.Memory != "" {
+		config["limits.memory"] = r.Memory
 	}
-	if cpuAllowance != "" {
-		config["limits.cpu.allowance"] = cpuAllowance
+	if r.CPUAllowance != "" {
+		config["limits.cpu.allowance"] = r.CPUAllowance
 	}
-	if processesLimit > 0 {
-		config["limits.processes"] = fmt.Sprintf("%d", processesLimit)
+	if r.ProcessesLimit > 0 {
+		config["limits.processes"] = fmt.Sprintf("%d", r.ProcessesLimit)
 	}
-	if privileged != nil {
-		config["security.privileged"] = fmt.Sprintf("%t", *privileged)
+	if r.Privileged != nil {
+		config["security.privileged"] = fmt.Sprintf("%t", *r.Privileged)
 	}
-	if memorySwap != nil {
-		config["limits.memory.swap"] = fmt.Sprintf("%t", *memorySwap)
+	if r.MemorySwap != nil {
+		config["limits.memory.swap"] = fmt.Sprintf("%t", *r.MemorySwap)
 	}
-	if allowNesting != nil {
-		config["security.nesting"] = fmt.Sprintf("%t", *allowNesting)
+	if r.AllowNesting != nil {
+		config["security.nesting"] = fmt.Sprintf("%t", *r.AllowNesting)
 	}
 	if len(config) > 0 {
 		patch["config"] = config
 	}
 
-	devices := map[string]interface{}{}
-	needDevices := disk != "" || ioRead != "" || ioWrite != ""
-	var info *ContainerInfo
-	if needDevices {
+	needDevices := r.Disk != "" || r.IORead != "" || r.IOWrite != "" || r.Ingress != nil || r.Egress != nil
+	if needDevices && info == nil {
 		var err error
-		info, err = c.GetContainerInfo(ctx, name)
+		info, err = c.GetContainerConfig(ctx, name)
 		if err != nil {
 			return fmt.Errorf("获取容器配置失败: %v", err)
 		}
 	}
-	if disk != "" || ioRead != "" || ioWrite != "" {
+
+	devices := map[string]interface{}{}
+	if r.Disk != "" || r.IORead != "" || r.IOWrite != "" {
 		root := map[string]interface{}{}
 		if devConfig, ok := info.Devices["root"].(map[string]interface{}); ok {
 			for k, v := range devConfig {
 				root[k] = v
 			}
 		}
-		if disk != "" {
-			root["size"] = disk
+		if r.Disk != "" {
+			root["size"] = r.Disk
 		}
-		if ioRead != "" {
-			root["limits.read"] = ioRead
+		if r.IORead != "" {
+			root["limits.read"] = r.IORead
 		}
-		if ioWrite != "" {
-			root["limits.write"] = ioWrite
+		if r.IOWrite != "" {
+			root["limits.write"] = r.IOWrite
 		}
 		devices["root"] = root
 	}
+
+	if r.Ingress != nil || r.Egress != nil {
+		devConfig, ok := info.Devices["eth0"].(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("容器 %s 没有 eth0 设备", name)
+		}
+		eth0 := make(map[string]interface{}, len(devConfig)+2)
+		for k, v := range devConfig {
+			eth0[k] = v
+		}
+		if r.Ingress != nil {
+			if *r.Ingress > 0 {
+				eth0["limits.ingress"] = fmt.Sprintf("%dMbit", *r.Ingress)
+			} else {
+				delete(eth0, "limits.ingress")
+			}
+		}
+		if r.Egress != nil {
+			if *r.Egress > 0 {
+				eth0["limits.egress"] = fmt.Sprintf("%dMbit", *r.Egress)
+			} else {
+				delete(eth0, "limits.egress")
+			}
+		}
+		devices["eth0"] = eth0
+	}
+
 	if len(devices) > 0 {
 		patch["devices"] = devices
 	}
 
 	if len(patch) == 0 {
-		logger.Info("无配置需要更新")
 		return nil
 	}
 
-	err := c.patch(ctx, fmt.Sprintf("/1.0/instances/%s", name), patch)
-	if err != nil {
+	if err := c.patch(ctx, fmt.Sprintf("/1.0/instances/%s", name), patch); err != nil {
 		return fmt.Errorf("更新容器配置失败: %v", err)
 	}
 
@@ -402,11 +459,20 @@ func (c *Client) UpdateContainerConfig(ctx context.Context, name string, cpu int
 
 // SetContainerBandwidth 设置容器 eth0 带宽；值为 0 时删除该方向的限速键。
 func (c *Client) SetContainerBandwidth(ctx context.Context, name string, ingressMbit, egressMbit int) error {
-	logger.Info("更新容器带宽: %s (ingress=%dMbit, egress=%dMbit)", name, ingressMbit, egressMbit)
-
-	info, err := c.GetContainerInfo(ctx, name)
+	info, err := c.GetContainerConfig(ctx, name)
 	if err != nil {
 		return fmt.Errorf("获取容器配置失败: %v", err)
+	}
+
+	return c.SetContainerBandwidthFromInfo(ctx, name, ingressMbit, egressMbit, info)
+}
+
+// SetContainerBandwidthFromInfo 复用已获取的实例配置，避免重复读配置。
+func (c *Client) SetContainerBandwidthFromInfo(ctx context.Context, name string, ingressMbit, egressMbit int, info *ContainerInfo) error {
+	logger.Info("更新容器带宽: %s (ingress=%dMbit, egress=%dMbit)", name, ingressMbit, egressMbit)
+
+	if info == nil {
+		return fmt.Errorf("容器配置为空")
 	}
 
 	devConfig, ok := info.Devices["eth0"].(map[string]interface{})
@@ -459,9 +525,18 @@ func (c *Client) sendIPv6NeighborRequest(containerName, address string) {
 }
 
 func (c *Client) SetContainerIPv4Address(ctx context.Context, name, ip string) error {
-	info, err := c.GetContainerInfo(ctx, name)
+	info, err := c.GetContainerConfig(ctx, name)
 	if err != nil {
 		return fmt.Errorf("获取容器配置失败: %v", err)
+	}
+
+	return c.SetContainerIPv4AddressFromInfo(ctx, name, ip, info)
+}
+
+// SetContainerIPv4AddressFromInfo 复用已获取的实例配置，避免重复读配置。
+func (c *Client) SetContainerIPv4AddressFromInfo(ctx context.Context, name, ip string, info *ContainerInfo) error {
+	if info == nil {
+		return fmt.Errorf("容器配置为空")
 	}
 
 	eth0 := map[string]interface{}{}
@@ -472,10 +547,9 @@ func (c *Client) SetContainerIPv4Address(ctx context.Context, name, ip string) e
 	}
 	eth0["ipv4.address"] = ip
 
-	err = c.patch(ctx, fmt.Sprintf("/1.0/instances/%s", name), map[string]interface{}{
+	if err := c.patch(ctx, fmt.Sprintf("/1.0/instances/%s", name), map[string]interface{}{
 		"devices": map[string]interface{}{"eth0": eth0},
-	})
-	if err != nil {
+	}); err != nil {
 		return fmt.Errorf("固定容器IPv4地址失败: %v", err)
 	}
 	logger.OK("容器 %s 的IPv4地址已固定: %s", name, ip)
